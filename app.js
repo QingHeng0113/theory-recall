@@ -631,7 +631,7 @@
     if (!rel.length) return '';
     const shown = rel.slice(0, 3);
     return `<div class="related-row">
-      <span class="related-label">易混/相关</span>
+      <span class="related-label">易混淆/相关</span>
       <div class="related-chips">
         ${shown.map(r => `<button class="rel-chip" data-action="open-related" data-id="${item.id}" data-focus="${r.id}">${esc(BY_ID[r.id].topic)}</button>`).join('')}
         ${rel.length > 3 ? `<button class="rel-chip more" data-action="open-related" data-id="${item.id}">+${rel.length - 3}</button>` : ''}
@@ -663,7 +663,7 @@
         </details>`;
       }).join('')}
     </div>
-    <div class="foot-note">红色是原文关键表述；“加入本轮”会把该条排到当前默写末尾。</div>`);
+    <div class="foot-note">红色是原文关键表述；${inSession ? "点“加入本轮”会把该条排到当前默写末尾。" : "点“默写这一条”直接开始单条默写。"}</div>`);
     if (focusId) {
       setTimeout(() => {
         const el = document.querySelector('.rel-item[open]');
