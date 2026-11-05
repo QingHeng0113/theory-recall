@@ -351,6 +351,57 @@
     }
     return { len: dp[n * w + m], markA, markB };
   }
+  function greedyAlign(a, b) {
+    const markA = new Uint8Array(a.length);
+    const markB = new Uint8Array(b.length);
+    let i = 0, len = 0;
+    for (let j = 0; j < b.length; j++) {
+      const idx = a.indexOf(b[j], i);
+      if (idx >= 0) { markA[idx] = 1; markB[j] = 1; i = idx + 1; len++; }
+    }
+    return { len, markA, markB };
+  }
+  function longestMatch(a, b, aLo, aHi, bLo, bHi) {
+    const m = bHi - bLo;
+    if (m <= 0 || aHi <= aLo) return { i: aLo, j: bLo, size: 0 };
+    const prev = new Uint16Array(m + 1);
+    const cur = new Uint16Array(m + 1);
+    let best = 0, bi = aLo, bj = bLo;
+    for (let i = aLo; i < aHi; i++) {
+      const ac = a[i];
+      for (let j = bLo; j < bHi; j++) {
+        if (ac === b[j]) {
+          const v = prev[j - bLo] + 1;
+          cur[j - bLo + 1] = v;
+          if (v > best) { best = v; bi = i - v + 1; bj = j - v + 1; }
+        } else cur[j - bLo + 1] = 0;
+      }
+      prev.set(cur);
+      cur.fill(0);
+    }
+    return { i: bi, j: bj, size: best };
+  }
+  function blockAlign(a, b) {
+    const markA = new Uint8Array(a.length);
+    const markB = new Uint8Array(b.length);
+    const blocks = [];
+    function rec(aLo, aHi, bLo, bHi, depth) {
+      if (depth > 80) return;
+      const m = longestMatch(a, b, aLo, aHi, bLo, bHi);
+      if (!m.size) return;
+      if (aLo < m.i && bLo < m.j) rec(aLo, m.i, bLo, m.j, depth + 1);
+      blocks.push(m);
+      for (let k = 0; k < m.size; k++) { markA[m.i + k] = 1; markB[m.j + k] = 1; }
+      if (m.i + m.size < aHi && m.j + m.size < bHi) rec(m.i + m.size, aHi, m.j + m.size, bHi, depth + 1);
+    }
+    rec(0, a.length, 0, b.length, 0);
+    return { markA, markB, blocks };
+  }
+  function alignMarks(a, b) {
+    if (!a.length || !b.length) return { markA: new Uint8Array(a.length), markB: new Uint8Array(b.length) };
+    if (a.length > 900 || b.length > 900) return greedyAlign(a, b);
+    return blockAlign(a, b);
+  }
   function lcsSub(a, b) {
     if (!a || !b) return 0;
     let best = 0;
@@ -367,6 +418,53 @@
       cur.fill(0);
     }
     return best;
+  }
+  function splitClauses(text) {
+    const out = [];
+    let start = 0;
+    for (let i = 0; i < text.length; i++) {
+      if ('，。；'.includes(text[i])) {
+        if (i > start) out.push({ s: start, e: i, text: text.slice(start, i) });
+        start = i + 1;
+      }
+    }
+    if (start < text.length) out.push({ s: start, e: text.length, text: text.slice(start) });
+    return out;
+  }
+  function clauseMarks(ref, user, rNorm, uNorm) {
+    const markA = new Uint8Array(rNorm.norm.length);
+    const markB = new Uint8Array(uNorm.norm.length);
+    const usedUser = new Uint8Array(user.length);
+    let lastUserEnd = 0;
+    for (const cl of splitClauses(ref)) {
+      const cn = normWithMap(cl.text).norm;
+      if (cn.length < 2) continue;
+      let from = 0, found = -1;
+      while (from <= uNorm.norm.length - cn.length) {
+        const idx = uNorm.norm.indexOf(cn, from);
+        if (idx < 0) break;
+        const us = uNorm.map[idx];
+        const ue = uNorm.map[idx + cn.length - 1] + 1;
+        let overlap = false;
+        for (let k = us; k < ue; k++) { if (usedUser[k]) { overlap = true; break; } }
+        if (!overlap && us >= lastUserEnd) { found = idx; break; }
+        from = idx + 1;
+      }
+      if (found < 0) continue;
+      for (let k = 0; k < rNorm.norm.length; k++) {
+        const oi = rNorm.map[k];
+        if (oi >= cl.s && oi < cl.e) markA[k] = 1;
+      }
+      const us = uNorm.map[found];
+      const ue = uNorm.map[found + cn.length - 1] + 1;
+      for (let k = 0; k < uNorm.norm.length; k++) {
+        const oi = uNorm.map[k];
+        if (oi >= us && oi < ue) markB[k] = 1;
+      }
+      for (let k = us; k < ue; k++) usedUser[k] = 1;
+      lastUserEnd = ue;
+    }
+    return { markA, markB };
   }
   function spansFromMark(normObj, mark) {
     const spans = [];
@@ -439,6 +537,8 @@
     const r = normWithMap(ref);
     const u = normWithMap(user);
     const l = lcsMark(r.norm, u.norm);
+    let g = clauseMarks(ref, user, r, u);
+    if (!g.markA.some(Boolean) && !g.markB.some(Boolean)) g = alignMarks(r.norm, u.norm);
     const recall = r.norm.length ? l.len / r.norm.length : 0;
     const precision = u.norm.length ? l.len / u.norm.length : 0;
     const keys = item.keyPoints.map(k => {
@@ -458,8 +558,8 @@
     score = clamp(Math.round(score), 0, 100);
     const missing = keys.filter(k => !k.hit);
     const partial = keys.filter(k => !k.hit && k.ratio >= 0.45);
-    const refSpans = u.norm.length ? spansFromMark(r, l.markA) : [];
-    const userSpans = u.norm.length ? spansFromMark(u, l.markB) : [];
+    const refSpans = u.norm.length ? spansFromMark(r, g.markA) : [];
+    const userSpans = u.norm.length ? spansFromMark(u, g.markB) : [];
     return {
       score, recall, precision, keyCov,
       keys, missing, partial,
