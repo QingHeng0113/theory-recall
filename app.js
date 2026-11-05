@@ -626,6 +626,68 @@
     </button>`;
   }
 
+  function relatedRowHTML(item) {
+    const rel = (item.related || []).filter(r => BY_ID[r.id]);
+    if (!rel.length) return '';
+    const shown = rel.slice(0, 3);
+    return `<div class="related-row">
+      <span class="related-label">易混/相关</span>
+      <div class="related-chips">
+        ${shown.map(r => `<button class="rel-chip" data-action="open-related" data-id="${item.id}" data-focus="${r.id}">${esc(BY_ID[r.id].topic)}</button>`).join('')}
+        ${rel.length > 3 ? `<button class="rel-chip more" data-action="open-related" data-id="${item.id}">+${rel.length - 3}</button>` : ''}
+      </div>
+    </div>`;
+  }
+  function openRelated(currentId, focusId) {
+    const cur = BY_ID[currentId];
+    if (!cur) return;
+    const rel = (cur.related || []).filter(r => BY_ID[r.id]);
+    if (!rel.length) { toast('暂无关联条目'); return; }
+    const inSession = !!(session && !session.finished);
+    openSheet(`<div class="sheet-head">
+      <div><h2>易混淆 / 相关</h2><p>${esc(cur.topic)} · 点标题展开答案</p></div>
+      <button class="sheet-close" data-action="close-sheet">${ico('x')}</button>
+    </div>
+    <div class="rel-intro">这些条目和当前知识点容易混，建议对比着记。</div>
+    <div class="rel-list">
+      ${rel.map(r => {
+        const it = BY_ID[r.id];
+        return `<details class="rel-item" ${r.id === focusId ? 'open' : ''}>
+          <summary>
+            <span class="rel-topic">第 ${it.n} 条 · ${esc(it.topic)}</span>
+            <span class="rel-note">${esc(r.note || '')}</span>
+          </summary>
+          <div class="rel-q">${esc(it.q)}</div>
+          <div class="rel-a">${segHTML(it)}</div>
+          <div class="rel-actions"><button class="btn btn-sm" data-action="related-study" data-id="${it.id}">${inSession ? '加入本轮' : '默写这一条'}</button></div>
+        </details>`;
+      }).join('')}
+    </div>
+    <div class="foot-note">红色是原文关键表述；“加入本轮”会把该条排到当前默写末尾。</div>`);
+    if (focusId) {
+      setTimeout(() => {
+        const el = document.querySelector('.rel-item[open]');
+        if (el) el.scrollIntoView({ block: 'center' });
+      }, 80);
+    }
+  }
+  function relatedStudy(id) {
+    if (!BY_ID[id]) return;
+    if (session && !session.finished) {
+      if (session.current?.id === id || session.queue.some(x => x.id === id) || session.replay.some(x => x.id === id)) {
+        toast('已经在当前轮次里');
+        return;
+      }
+      session.queue.push({ id, isNew: isNew(id) });
+      session.total++;
+      closeSheet();
+      toast('已加入本轮末尾');
+      return;
+    }
+    closeSheet();
+    startOne(id);
+  }
+
   function homeHTML() {
     const day = getDay();
     const p = plan();
@@ -719,12 +781,18 @@
     const recent = state.attempts.slice(0, 5);
     const avg = avgScore();
     const total = totalAttempts();
+    const learned = learnedCount();
     return `
     <div class="page-head"><h1>默写训练</h1><p>每次默写都会批改、给建议，并更新复习计划。</p></div>
     <div class="mode-grid">
       <button class="mode-card" data-action="start-session">
         <span class="mode-ico red">${ico('pen')}</span>
         <span class="mode-main"><h3>今日默写</h3><p>到期复习 + 今日新学，按 FSRS 安排</p><span class="rec">${remain ? `还剩 ${remain} 条` : '今天已完成'}</span></span>
+        <span class="chev">${ico('chevron')}</span>
+      </button>
+      <button class="mode-card" data-action="practice-learned">
+        <span class="mode-ico blue">${ico('book')}</span>
+        <span class="mode-main"><h3>已学抽背</h3><p>从已经学过的条目里随机抽 10 条默写</p><span class="rec">${learned ? `已学 ${learned} 条` : '先完成今日默写'}</span></span>
         <span class="chev">${ico('chevron')}</span>
       </button>
       <button class="mode-card" data-action="practice-random">
@@ -765,6 +833,7 @@
     if (libFilter === 'base') return item.sec === '基础理论';
     if (libFilter === 'new') return item.sec === '新时代';
     if (libFilter === 'unlearned') return lv === 0;
+    if (libFilter === 'learned') return lv > 0;
     if (libFilter === 'learning') return lv === 1;
     if (libFilter === 'mastered') return lv === 3;
     if (libFilter === 'wrong') return (state.wrong[item.id]?.count > 0) || (last && last.score < 60);
@@ -794,13 +863,13 @@
   function libraryHTML() {
     const filters = [
       ['all', '全部'], ['base', '基础理论'], ['new', '新时代'], ['unlearned', '未学'],
-      ['learning', '学习中'], ['mastered', '已掌握'], ['wrong', '易错']
+      ['learned', '已学'], ['learning', '学习中'], ['mastered', '已掌握'], ['wrong', '易错']
     ];
     return `
     <div class="page-head"><h1>题库</h1><p>95 条原文，按篇章筛选，点开可单条默写。</p></div>
     <div class="searchbar">${ico('search')}<input id="libSearch" placeholder="搜索题目或答案关键词" value="${esc(libQuery)}"></div>
     <div class="filters">${filters.map(([k, n]) => `<button class="filter ${libFilter === k ? 'active' : ''}" data-action="lib-filter" data-filter="${k}">${n}</button>`).join('')}</div>
-    <div class="lib-count" id="libCount"></div>
+    <div class="lib-actions"><div class="lib-count" id="libCount"></div><button class="btn btn-sm" data-action="practice-learned">从已学抽 10 条</button></div>
     <div class="lib-list" id="libListWrap">${libListHTML()}</div>`;
   }
   function refreshLibCount() {
@@ -946,6 +1015,7 @@
     <div class="detail-q">${esc(item.q)}</div>
     <div class="detail-a">${segHTML(item)}</div>
     <div class="detail-keys">${item.keyPoints.map(k => `<span>${esc(k.t)}</span>`).join('')}</div>
+    ${relatedRowHTML(item)}
     <div class="srs-grid">
       <div><b>${c ? fmtDue(c.due) : '未学'}</b><span>下次复习</span></div>
       <div><b>${c ? (c.scheduled_days || 0) + ' 天' : '—'}</b><span>当前间隔</span></div>
@@ -1097,6 +1167,11 @@
   }
   function startRandom() {
     startQueue(shuffle(ITEMS).slice(0, 10).map(x => ({ id: x.id, isNew: isNew(x.id) })), 'random');
+  }
+  function startLearned() {
+    const ids = ITEMS.filter(x => !isNew(x.id));
+    if (!ids.length) { toast('还没有已学条目，先完成今日默写'); return; }
+    startQueue(shuffle(ids).slice(0, 10).map(x => ({ id: x.id, isNew: false })), 'learned');
   }
   function startWrong() {
     const ids = Object.keys(state.wrong)
@@ -1267,7 +1342,7 @@
     const total = Math.max(session.total, done + session.queue.length + session.replay.length);
     const pct = total ? (done / total) * 100 : 0;
     const isReplay = !!session.current.replay;
-    const title = session.mode === 'srs' ? '今日默写' : session.mode === 'random' ? '随机抽背' : session.mode === 'wrong' ? '错题重默' : session.mode === 'weak' ? '薄弱专项' : '单条默写';
+    const title = session.mode === 'srs' ? '今日默写' : session.mode === 'learned' ? '已学抽背' : session.mode === 'random' ? '随机抽背' : session.mode === 'wrong' ? '错题重默' : session.mode === 'weak' ? '薄弱专项' : '单条默写';
     sessionEl.innerHTML = `<div class="session-shell">
       <div class="session-top">
         <button class="session-close" data-action="close-session" aria-label="退出">${ico('x')}</button>
@@ -1315,6 +1390,7 @@
         <span>${item.a.length} 字</span><span class="dot"></span><span>${kp} 个关键点</span>
         ${session.current.isNew ? '<span class="dot"></span><span>先按自己的理解写</span>' : ''}
       </div>
+      ${relatedRowHTML(item)}
       <textarea id="answerInput" class="answer-input" placeholder="凭记忆写下答案。不必逐字一致，关键点要对。">${esc(session.userAnswer)}</textarea>
       <div class="answer-tools">
         <span id="charCount">${session.userAnswer.length} 字</span>
@@ -1334,6 +1410,7 @@
         <div class="answer-text">${segHTML(item)}</div>
         <div class="key-row">${item.keyPoints.map(k => `<span>${esc(k.t)}</span>`).join('')}</div>
       </div>
+      ${relatedRowHTML(item)}
       <button class="continue-btn" data-action="replay-continue">记住了，继续</button>`;
   }
   function resultView(item) {
@@ -1361,6 +1438,7 @@
         </div>
       </div>
       <div class="key-hits">${keyChips}</div>
+      ${relatedRowHTML(item)}
       <div class="compare-card">
         <div class="compare-label">参考答案 <span>红色 = 与原文不一致</span></div>
         <div class="answer-text">${res.refHTML}</div>
@@ -1417,7 +1495,7 @@
     const total = s.stats.scoreCount;
     const avg = total ? Math.round(s.stats.scoreSum / total) : 0;
     const remain = dueItems().length;
-    const title = s.mode === 'srs' ? '本轮默写完成' : s.mode === 'random' ? '随机抽背完成' : s.mode === 'wrong' ? '错题重默完成' : s.mode === 'weak' ? '薄弱专项完成' : '默写完成';
+    const title = s.mode === 'srs' ? '本轮默写完成' : s.mode === 'learned' ? '已学抽背完成' : s.mode === 'random' ? '随机抽背完成' : s.mode === 'wrong' ? '错题重默完成' : s.mode === 'weak' ? '薄弱专项完成' : '默写完成';
     sessionEl.innerHTML = `<div class="session-shell">
       <div class="session-top"><button class="session-close" data-action="close-session">${ico('x')}</button><div class="progress-track"><i style="width:100%"></i></div><span class="session-counter">完成</span></div>
       <div class="session-body">
@@ -1659,6 +1737,10 @@
         closeSheet();
         startRandom();
         break;
+      case 'practice-learned':
+        closeSheet();
+        startLearned();
+        break;
       case 'practice-wrong':
         closeSheet();
         startWrong();
@@ -1672,6 +1754,12 @@
         break;
       case 'open-detail':
         openDetail(id);
+        break;
+      case 'open-related':
+        openRelated(id, el.dataset.focus || '');
+        break;
+      case 'related-study':
+        relatedStudy(id);
         break;
       case 'close-sheet':
         closeSheet();
