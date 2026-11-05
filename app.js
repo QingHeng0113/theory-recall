@@ -1274,7 +1274,7 @@
         <div class="progress-track"><i style="width:${clamp(pct, 0, 100)}%"></i></div>
         <span class="session-counter">${isReplay ? '巩固' : `${Math.min(done + 1, total)}/${total}`}</span>
       </div>
-      <div class="session-body">
+      <div class="session-body ${session.submitted && !isReplay ? 'with-dock' : ''}">
         <div class="session-inner">
           <div class="study-eyebrow">
             <span class="pill">${esc(title)}</span>
@@ -1285,6 +1285,7 @@
           ${isReplay ? replayView(item) : (session.submitted ? resultView(item) : inputView(item))}
         </div>
       </div>
+      ${session.submitted && !isReplay ? rateDockHTML(item) : ''}
     </div>`;
     const ta = $('#answerInput');
     if (ta) {
@@ -1337,20 +1338,6 @@
   }
   function resultView(item) {
     const res = session.result;
-    const suggested = session.suggested || scoreToRating(res.score);
-    const pv = previewFor(item.id);
-    const ratings = [
-      [1, '忘记', 'rate-again'],
-      [2, '模糊', 'rate-hard'],
-      [3, '记得', 'rate-good'],
-      [4, '太简单', 'rate-easy']
-    ];
-    const interval = r => {
-      try {
-        const c = pv?.[r]?.card;
-        return c ? fmtInterval(c.scheduled_days) : '—';
-      } catch (e) { return '—'; }
-    };
     const keyChips = res.keys.map(k => {
       const cls = k.hit ? 'hit' : (k.ratio >= 0.45 ? 'part' : 'miss');
       const label = k.hit ? '✓' : (k.ratio >= 0.45 ? '~' : '✗');
@@ -1383,16 +1370,32 @@
         <div class="advice-title">${ico('bulb')}怎么记</div>
         <ul>${res.advice.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
       </div>
-      <div class="ai-box" id="aiBox">${aiBoxHTML()}</div>
-      <div class="rate-wrap">
-        <div class="rate-hint">按这次默写，建议选「${ratings.find(r => r[0] === suggested)?.[1]}」。也可以自己调整。</div>
-        <div class="rate-grid">
-          ${ratings.map(([r, label, cls]) => `<button class="rate ${cls} ${r === suggested ? 'suggested' : ''}" data-action="rate" data-rating="${r}">
-            <span>${label}</span><small>${interval(r)}</small>${r === suggested ? '<i>建议</i>' : ''}
-          </button>`).join('')}
-        </div>
-        <div class="rate-foot">评级会决定下次复习时间，选完自动进入下一题。</div>
-      </div>`;
+      <div class="ai-box" id="aiBox">${aiBoxHTML()}</div>`;
+  }
+  function rateDockHTML(item) {
+    const res = session.result;
+    const suggested = session.suggested || scoreToRating(res.score);
+    const pv = previewFor(item.id);
+    const ratings = [
+      [1, '忘记', 'rate-again'],
+      [2, '模糊', 'rate-hard'],
+      [3, '记得', 'rate-good'],
+      [4, '太简单', 'rate-easy']
+    ];
+    const interval = r => {
+      try {
+        const c = pv?.[r]?.card;
+        return c ? fmtInterval(c.scheduled_days) : '—';
+      } catch (e) { return '—'; }
+    };
+    return `<div class="rate-dock">
+      <div class="rate-dock-hint">建议选「${ratings.find(r => r[0] === suggested)?.[1]}」，也可以自己调整</div>
+      <div class="rate-grid">
+        ${ratings.map(([r, label, cls]) => `<button class="rate ${cls} ${r === suggested ? 'suggested' : ''}" data-action="rate" data-rating="${r}">
+          <span>${label}</span><small>${interval(r)}</small>${r === suggested ? '<i>建议</i>' : ''}
+        </button>`).join('')}
+      </div>
+    </div>`;
   }
   function aiBoxHTML() {
     if (session.aiLoading) {

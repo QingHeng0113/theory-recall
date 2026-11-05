@@ -615,3 +615,18 @@ mark.extra{background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(
 html[data-theme="dark"] .brand-mark,
 html[data-theme="dark"] .avatar{background:linear-gradient(145deg,#a4262c,#731018);color:#f6e6c8}
 html[data-theme="dark"] .hero{background:linear-gradient(140deg,#7f1119 0%,#9c1c24 45%,#620a12 100%)}
+
+/* fixed rating dock */
+.session-body.with-dock{padding-bottom:108px}
+.rate-dock{
+  position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:66;
+  width:min(100%,560px);padding:8px 18px calc(8px + var(--safe));
+  background:color-mix(in srgb,var(--bg) 93%,transparent);
+  border-top:1px solid var(--line);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  box-shadow:0 -10px 28px rgba(60,30,20,.08);
+}
+.rate-dock-hint{font-size:10.5px;color:var(--muted);text-align:center;margin-bottom:6px}
+.rate-dock .rate{min-height:56px;background-clip:padding-box}
+.rate-dock .rate small{font-size:9px}
+html[data-theme="dark"] .rate-dock{box-shadow:0 -10px 28px rgba(0,0,0,.3)}
