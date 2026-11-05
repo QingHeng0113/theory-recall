@@ -10,7 +10,7 @@
   const PUNCT_CHAR_RE = /[\s，。；：、！？,.;:!?、“”‘’"'（）()《》〈〉【】\[\]{}—…·\-—_/\\|]/;
 
   const AI_PRESETS = {
-    siliconflow: { name: 'SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
+    siliconflow: { name: 'SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V4-Flash' },
     deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
     zhipu: { name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
     custom: { name: '自定义', baseUrl: '', model: '' }
@@ -25,7 +25,7 @@
     ai: {
       preset: 'siliconflow',
       baseUrl: 'https://api.siliconflow.cn/v1',
-      model: 'Qwen/Qwen2.5-7B-Instruct',
+      model: 'deepseek-ai/DeepSeek-V4-Flash',
       key: '',
       auto: false
     }
@@ -1015,7 +1015,7 @@
       <div><h2>AI 深度点评</h2><p>可选功能；不配置也能用本地批改</p></div>
       <button class="sheet-close" data-action="close-sheet">${ico('x')}</button>
     </div>
-    <div class="ai-note">Key 只保存在本机浏览器，不会写进网页代码，也不会随导出备份一起导出。请求直接发往你填写的接口。</div>
+    <div class="ai-note">需要自备一个可用的 API Key（有余额/额度）。Key 只保存在本机浏览器，不会写进网页代码，也不会随导出备份一起导出；请求直接发往你填写的接口。</div>
     <div class="settings-sheet">
       <h3>接口预设</h3>
       <div class="preset-row">
@@ -1485,6 +1485,10 @@
     }
     clearTimeout(timer);
     if (!resp.ok) {
+      if (resp.status === 401) throw new Error('API Key 无效或已过期（401）');
+      if (resp.status === 402) throw new Error('接口账户余额不足（402），请充值或换一个 Key');
+      if (resp.status === 403) throw new Error('接口拒绝访问（403），请检查 Key 权限或地区限制');
+      if (resp.status === 429) throw new Error('请求太频繁（429），稍后再试');
       const t = await resp.text().catch(() => '');
       throw new Error(`接口 ${resp.status}：${t.slice(0, 180)}`);
     }
