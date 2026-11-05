@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=5">
+<meta name="theme-color" content="#9e1b22">
+<meta name="description" content="党的基本理论知识 · 个人记忆卡">
+<meta name="robots" content="noindex,nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="理论记忆">
+<title>理论记忆 · 党的基本理论知识</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16"/><path d="M8 7h8M8 10.5h6"/></svg>
+      </span>
+      <span class="brand-text">理论记忆<small>党的基本理论知识</small></span>
+    </div>
+    <button class="streak-chip" data-action="tab" data-tab="me" aria-label="查看学习统计">
+      <span class="flame">🔥</span><b id="topStreak">0</b><span>天</span>
+    </button>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="tabbar" aria-label="主导航">
+    <button class="tab active" data-action="tab" data-tab="home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></svg>
+      <span>今日</span>
+    </button>
+    <button class="tab" data-action="tab" data-tab="practice">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6.5h11v11h-11z"/><path d="M9.5 3v3.5M14.5 3v3.5M9.5 17.5V21M14.5 17.5V21M3 9.5h3.5M3 14.5h3.5M17.5 9.5H21M17.5 14.5H21"/></svg>
+      <span>训练</span>
+    </button>
+    <button class="tab" data-action="tab" data-tab="library">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"/><path d="M4 4.5v15"/><path d="M8 6.5h8M8 10h6M8 13.5h7"/></svg>
+      <span>题库</span>
+    </button>
+    <button class="tab" data-action="tab" data-tab="me">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 21c.7-4 3.6-6.2 7.5-6.2s6.8 2.2 7.5 6.2"/></svg>
+      <span>我的</span>
+    </button>
+  </nav>
+</div>
+
+<div class="sheet-backdrop" id="backdrop" data-action="close-sheet"></div>
+<section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="详情"></section>
+<section class="session" id="session" role="dialog" aria-modal="true" aria-label="学习"></section>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="confetti" id="confetti" aria-hidden="true"></div>
+
+<script src="fsrs.umd.js"></script>
+<script src="deck.js"></script>
+<script src="app.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
