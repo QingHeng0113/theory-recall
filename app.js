@@ -4,6 +4,7 @@
   const ITEMS = DECK.items;
   const BY_ID = Object.fromEntries(ITEMS.map(x => [x.id, x]));
   const BY_N = Object.fromEntries(ITEMS.map(x => [x.n, x]));
+  const TOTAL = ITEMS.length;
   const LS_KEY = 'theory_recall_v1';
   const RING_C = 2 * Math.PI * 52;
   const NUM_RE = /(?:\d{1,4}|[〇一二三四五六七八九十百]{1,6})年|(?:[〇一二三四五六七八九十百]{1,3}|\d{1,2})个月|本世纪中叶/g;
@@ -43,6 +44,7 @@
   const confettiEl = $('#confetti');
 
   let state = loadState();
+  if (state._needsSave) { delete state._needsSave; save(); }
   let engine = null;
   let currentTab = 'home';
   let session = null;
@@ -128,9 +130,50 @@
       weak: {},
       wrong: {},
       chat: [],
+      deckCount: TOTAL,
       settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
       created: Date.now()
     };
+  }
+  function migrateDeckState(s) {
+    const mig = DECK.meta && DECK.meta.migration;
+    if (!mig || !mig.map) { s.deckCount = TOTAL; return s; }
+    if (s.deckCount != null && s.deckCount !== mig.fromCount) { s.deckCount = TOTAL; return s; }
+    const map = mig.map;
+    const num = k => parseInt(String(k).replace(/\D/g, ''), 10);
+    const cards = {};
+    for (const [k, v] of Object.entries(s.cards || {})) {
+      const nn = map[String(num(k))];
+      if (!nn) continue;
+      const nk = 'q' + nn;
+      if (!cards[nk] || (v.reps || 0) > (cards[nk].reps || 0)) cards[nk] = v;
+    }
+    s.cards = cards;
+    const attempts = [];
+    for (const a of s.attempts || []) {
+      const nn = map[String(num(a.id))];
+      if (nn) attempts.push({ ...a, id: 'q' + nn });
+    }
+    s.attempts = attempts.slice(0, 40);
+    const wrong = {};
+    for (const [k, v] of Object.entries(s.wrong || {})) {
+      const nn = map[String(num(k))];
+      if (!nn) continue;
+      const nk = 'q' + nn;
+      if (!wrong[nk]) wrong[nk] = { count: 0, last: 0 };
+      wrong[nk].count = Math.max(wrong[nk].count, v.count || 0);
+      wrong[nk].last = Math.max(wrong[nk].last, v.last || 0);
+    }
+    s.wrong = wrong;
+    const drafts = {};
+    for (const [k, v] of Object.entries(s.drafts || {})) {
+      const nn = map[String(num(k))];
+      if (nn) drafts['q' + nn] = v;
+    }
+    s.drafts = drafts;
+    s.deckCount = TOTAL;
+    s._needsSave = true;
+    return s;
   }
   function loadState() {
     const base = blankState();
@@ -154,7 +197,8 @@
           ai: { ...base.settings.ai, ...((d.settings || {}).ai || {}) }
         }
       };
-      return s;
+      s.deckCount = d.deckCount == null ? ((DECK.meta.migration && DECK.meta.migration.fromCount) || TOTAL) : d.deckCount;
+      return migrateDeckState(s);
     } catch (e) {
       return base;
     }
@@ -743,7 +787,7 @@
       .sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
       .slice(0, 8);
     const lines = [];
-    lines.push(`学习概览：已学 ${learned}/95，平均 ${avg || '—'} 分，连续 ${st} 天；今日待复习 ${p.due} 条、待新学 ${p.fresh} 条。`);
+    lines.push(`学习概览：已学 ${learned}/${TOTAL}，平均 ${avg || '—'} 分，连续 ${st} 天；今日待复习 ${p.due} 条、待新学 ${p.fresh} 条。`);
     if (weak.length) {
       lines.push(`薄弱要点（按漏写次数）：${weak.map(w => `${w.key}（漏 ${w.miss} 次，命中率 ${Math.round(w.acc * 100)}%）`).join('；')}。`);
     }
@@ -820,7 +864,7 @@ ${chatContext()}`;
           <button class="icon-btn" data-action="ai-settings" title="AI 设置">${ico('target')}</button>
         </div>
       </div>
-      <div class="chat-context">已带入：已学 ${learnedCount()}/95 · 最近 ${state.attempts.length} 次默写 · ${topWeak(8).length} 个薄弱要点</div>
+      <div class="chat-context">已带入：已学 ${learnedCount()}/${TOTAL} · 最近 ${state.attempts.length} 次默写 · ${topWeak(8).length} 个薄弱要点</div>
       ${focus ? `<div class="chat-focus">正在分析：第 ${focus.n} 条 · ${esc(focus.topic)} <button data-action="chat-focus-clear">×</button></div>` : ''}
       <div class="chat-messages" id="chatMessages">
         ${state.chat.length ? state.chat.map((m, i) => chatMsgHTML(m, i)).join('') : chatWelcomeHTML()}
@@ -987,7 +1031,7 @@ ${chatContext()}`;
       .slice(0, 6);
     const low = state.attempts.filter(a => a.score < 75).slice(0, 6);
     const lines = ['本地诊断（不调用 AI）', ''];
-    lines.push(`学习概览：已学 ${learned}/95，平均 ${avg || '—'} 分，连续 ${st} 天；今天还有 ${p.due + p.fresh} 条（复习 ${p.due} + 新学 ${p.fresh}）。`);
+    lines.push(`学习概览：已学 ${learned}/${TOTAL}，平均 ${avg || '—'} 分，连续 ${st} 天；今天还有 ${p.due + p.fresh} 条（复习 ${p.due} + 新学 ${p.fresh}）。`);
     if (!learned && !state.attempts.length) {
       lines.push('还没有默写记录，建议先完成今天的默写任务，再来看诊断。');
       return lines.join('\n');
@@ -1103,7 +1147,7 @@ ${chatContext()}`;
 
     return `
     <div class="home-head">
-      <div><h1>${greeting()}，今天也背一点</h1><p>${fmtDateCN()} · 共 95 条 · FSRS 间隔复习</p></div>
+      <div><h1>${greeting()}，今天也背一点</h1><p>${fmtDateCN()} · 共 ${TOTAL} 条 · FSRS 间隔复习</p></div>
     </div>
     <section class="hero">
       <div class="hero-top"><span>今日默写</span><span>${done} / ${target || done || 0}</span></div>
@@ -1118,7 +1162,7 @@ ${chatContext()}`;
       </div>
     </section>
     <div class="stat-strip">
-      <div class="stat-mini"><b>${learned}<small style="font-size:11px;color:var(--muted)">/95</small></b><span>已学条目</span></div>
+      <div class="stat-mini"><b>${learned}<small style="font-size:11px;color:var(--muted)">/${TOTAL}</small></b><span>已学条目</span></div>
       <div class="stat-mini gold"><b>${avg || '—'}</b><span>平均得分</span></div>
       <div class="stat-mini red"><b>${st}</b><span>连续天数</span></div>
     </div>
@@ -1185,7 +1229,7 @@ ${chatContext()}`;
       </button>
       <button class="mode-card" data-action="practice-random">
         <span class="mode-ico gold">${ico('zap')}</span>
-        <span class="mode-main"><h3>随机抽背</h3><p>从 95 条中抽 10 条，适合碎片时间</p><span class="rec">会更新复习计划</span></span>
+        <span class="mode-main"><h3>随机抽背</h3><p>从 ${TOTAL} 条中抽 10 条，适合碎片时间</p><span class="rec">会更新复习计划</span></span>
         <span class="chev">${ico('chevron')}</span>
       </button>
       <button class="mode-card" data-action="practice-wrong">
@@ -1219,7 +1263,7 @@ ${chatContext()}`;
     const lv = masteryLevel(item.id);
     const last = lastAttempt(item.id);
     if (libFilter === 'base') return item.sec === '基础理论';
-    if (libFilter === 'new') return item.sec === '新时代';
+    if (libFilter === 'new') return item.sec === '二十大';
     if (libFilter === 'unlearned') return lv === 0;
     if (libFilter === 'learned') return lv > 0;
     if (libFilter === 'learning') return lv === 1;
@@ -1250,11 +1294,11 @@ ${chatContext()}`;
   }
   function libraryHTML() {
     const filters = [
-      ['all', '全部'], ['base', '基础理论'], ['new', '新时代'], ['unlearned', '未学'],
+      ['all', '全部'], ['base', '基础理论'], ['new', '二十大'], ['unlearned', '未学'],
       ['learned', '已学'], ['learning', '学习中'], ['mastered', '已掌握'], ['wrong', '易错']
     ];
     return `
-    <div class="page-head"><h1>题库</h1><p>95 条原文，按篇章筛选，点开可单条默写。</p></div>
+    <div class="page-head"><h1>题库</h1><p>${TOTAL} 条原文，按篇章筛选，点开可单条默写。</p></div>
     <div class="searchbar">${ico('search')}<input id="libSearch" placeholder="搜索题目或答案关键词" value="${esc(libQuery)}"></div>
     <div class="filters">${filters.map(([k, n]) => `<button class="filter ${libFilter === k ? 'active' : ''}" data-action="lib-filter" data-filter="${k}">${n}</button>`).join('')}</div>
     <div class="lib-actions"><div class="lib-count" id="libCount"></div><button class="btn btn-sm" data-action="practice-learned">从已学抽 10 条</button></div>
@@ -1312,7 +1356,7 @@ ${chatContext()}`;
       <div><h2>理论记忆 · 个人版</h2><p>已坚持 ${st} 天 · 累计默写 ${total} 次</p></div>
     </div>
     <div class="me-stats">
-      <div class="me-stat"><b>${learned}<small style="font-size:11px;color:var(--muted)">/95</small></b><span>已学条目</span></div>
+      <div class="me-stat"><b>${learned}<small style="font-size:11px;color:var(--muted)">/${TOTAL}</small></b><span>已学条目</span></div>
       <div class="me-stat gold"><b>${avg || '—'}</b><span>平均得分</span></div>
       <div class="me-stat green"><b>${Math.round(m[3] / ITEMS.length * 100)}%</b><span>掌握率</span></div>
       <div class="me-stat red"><b>${st}</b><span>连续天数</span></div>
@@ -1446,7 +1490,7 @@ ${chatContext()}`;
     <div class="settings-sheet">
       <h3>每日新学</h3>
       <div class="set-row">
-        <div class="set-main"><b>${s.newLimit} 条 / 天</b><span>95 条约 ${Math.ceil(95 / Math.max(1, s.newLimit))} 天学完第一轮</span></div>
+        <div class="set-main"><b>${s.newLimit} 条 / 天</b><span>${TOTAL} 条约 ${Math.ceil(TOTAL / Math.max(1, s.newLimit))} 天学完第一轮</span></div>
         <div class="stepper">
           <button data-action="new-limit" data-delta="-5">−</button>
           <b>${s.newLimit}</b>
@@ -1508,14 +1552,14 @@ ${chatContext()}`;
       <button class="sheet-close" data-action="close-sheet">${ico('x')}</button>
     </div>
     <div class="about">
-      <p><b>这是什么</b><br>把《党的基本理论知识篇》的 95 个问答做成默写卡：先凭记忆写，再自动对照原文，标出漏写和写错的地方，给出记忆建议，并按 FSRS 安排下次复习。</p>
+      <p><b>这是什么</b><br>把两份最新版文档合并去重后的 ${TOTAL} 个问答做成默写卡：先凭记忆写，再自动对照原文，标出漏写和写错的地方，给出记忆建议，并按 FSRS 安排下次复习。</p>
       <p><b>批改方式</b><br>本地批改不联网：按“字符覆盖率 + 要点命中 + 数字检查”打分，红色标出与原文文字不一致的地方。红色不一定代表意思错，只代表和原文表述不同。</p>
       <p><b>AI 教练</b><br>可选。问答页会把学习概览、最近默写、薄弱要点和题库索引发给已配置的模型；批改页的“AI 深度点评”共用同一接口。SiliconFlow 支持浏览器直连；OpenCode Go 的 dsv4.1-flash 需要服务端代理，浏览器直连会被 CORS 拦截。Key 只存本机。</p>
       <p><b>算法</b><br>FSRS 4.5（Free Spaced Repetition Scheduler），根据“忘记 / 模糊 / 记得 / 太简单”四级评级计算稳定度和难度；本地内置的是 <a href="https://github.com/open-spaced-repetition/ts-fsrs" target="_blank" rel="noopener">ts-fsrs</a> 4.7.1 的浏览器版本。</p>
       <p><b>交互参考</b><br><span class="tag">Anki</span><span class="tag">词光 Word Atlas</span><span class="tag">qwerty-learner</span> 的每日任务、间隔复习和移动端卡片思路。</p>
-      <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 95 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
+      <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 ${TOTAL} 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
       <p><b>隐私</b><br>学习记录和对话记录只存在本机 localStorage；没有账号、没有服务器。只有你点击发送时，当前题目/学习摘要和对话才会发给你配置的接口。换手机或清缓存前，请在“我的”里导出备份。</p>
-      <p style="font-size:11px">版本 1.1 · 2026-11-05</p>
+      <p style="font-size:11px">版本 2.0 · 2026-11-06</p>
     </div>`;
   }
 
@@ -2052,6 +2096,8 @@ ${chatContext()}`;
           if (!confirm('导入会覆盖当前学习进度，确定吗？')) return;
           const keepKey = state.settings.ai.key;
           state = loadStateFrom(d);
+          state.deckCount = d.deckCount == null ? ((DECK.meta.migration && DECK.meta.migration.fromCount) || TOTAL) : d.deckCount;
+          state = migrateDeckState(state);
           if (keepKey) state.settings.ai.key = keepKey;
           engine = makeEngine();
           save();
