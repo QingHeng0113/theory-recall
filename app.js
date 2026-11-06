@@ -10,7 +10,8 @@
   const PUNCT_CHAR_RE = /[\s，。；：、！？,.;:!?、“”‘’"'（）()《》〈〉【】\[\]{}—…·\-—_/\\|]/;
 
   const AI_PRESETS = {
-    siliconflow: { name: 'SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V4-Flash' },
+    siliconflow: { name: 'SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V4.1-Flash' },
+    opencode: { name: 'OpenCode Go', baseUrl: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4.1-flash' },
     deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
     zhipu: { name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
     custom: { name: '自定义', baseUrl: '', model: '' }
@@ -25,8 +26,9 @@
     ai: {
       preset: 'siliconflow',
       baseUrl: 'https://api.siliconflow.cn/v1',
-      model: 'deepseek-ai/DeepSeek-V4-Flash',
+      model: 'deepseek-ai/DeepSeek-V4.1-Flash',
       key: '',
+      sessionId: '',
       auto: false
     }
   };
@@ -50,6 +52,10 @@
   let toastTimer = null;
   let aiSaveTimer = null;
   let speechToken = 0;
+  let chatBusy = false;
+  let chatController = null;
+  let chatDraft = '';
+  let coachFocus = null;
 
   /* ------------------------------------------------------------------ utils */
   function esc(s) {
@@ -121,6 +127,7 @@
       attempts: [],
       weak: {},
       wrong: {},
+      chat: [],
       settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
       created: Date.now()
     };
@@ -140,6 +147,7 @@
         attempts: Array.isArray(d.attempts) ? d.attempts : [],
         weak: d.weak || {},
         wrong: d.wrong || {},
+        chat: Array.isArray(d.chat) ? d.chat.slice(-40) : [],
         settings: {
           ...base.settings,
           ...(d.settings || {}),
@@ -688,6 +696,386 @@
     startOne(id);
   }
 
+  const QUICK_PROMPTS = [
+    '分析我的薄弱点，按遗漏次数排序，给我 3 条改进建议。',
+    '整理我最近的错题，指出共同问题。',
+    '给我未来 7 天的复习安排，具体到条目编号。',
+    '对比「四个意识、四个自信、四个伟大、两个维护」。',
+    '用口诀帮我记最近最容易漏的 3 个要点。'
+  ];
+  function inlineMd(s) {
+    return s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  }
+  function mdLite(text) {
+    const lines = esc(String(text || '')).split('\n');
+    let html = '', list = '';
+    const close = () => { if (list) { html += `</${list}>`; list = ''; } };
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) { close(); html += '<div class="md-gap"></div>'; continue; }
+      let m;
+      if ((m = line.match(/^[-*•]\s+(.*)$/))) {
+        if (list !== 'ul') { close(); html += '<ul>'; list = 'ul'; }
+        html += `<li>${inlineMd(m[1])}</li>`;
+        continue;
+      }
+      if ((m = line.match(/^\d+[.、]\s+(.*)$/))) {
+        if (list !== 'ol') { close(); html += '<ol>'; list = 'ol'; }
+        html += `<li>${inlineMd(m[1])}</li>`;
+        continue;
+      }
+      close();
+      if ((m = line.match(/^#{1,4}\s+(.*)$/))) { html += `<h4>${inlineMd(m[1])}</h4>`; continue; }
+      html += `<p>${inlineMd(line)}</p>`;
+    }
+    close();
+    return html;
+  }
+  function chatContext() {
+    const p = plan();
+    const learned = learnedCount();
+    const avg = avgScore();
+    const st = streak();
+    const weak = topWeak(8);
+    const attempts = state.attempts.slice(0, 12);
+    const wrong = Object.entries(state.wrong)
+      .filter(([id, v]) => v?.count > 0 && BY_ID[id])
+      .sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
+      .slice(0, 8);
+    const lines = [];
+    lines.push(`学习概览：已学 ${learned}/95，平均 ${avg || '—'} 分，连续 ${st} 天；今日待复习 ${p.due} 条、待新学 ${p.fresh} 条。`);
+    if (weak.length) {
+      lines.push(`薄弱要点（按漏写次数）：${weak.map(w => `${w.key}（漏 ${w.miss} 次，命中率 ${Math.round(w.acc * 100)}%）`).join('；')}。`);
+    }
+    if (attempts.length) {
+      lines.push(`最近默写：${attempts.map(a => {
+        const it = BY_ID[a.id];
+        return `第${it.n}条《${it.topic}》${a.skipped ? '未作答' : a.score + '分'}${a.missing?.length ? '，漏：' + a.missing.join('、') : ''}`;
+      }).join('；')}。`);
+    }
+    if (wrong.length) {
+      lines.push(`错题本：${wrong.map(([id, v]) => {
+        const it = BY_ID[id];
+        return `第${it.n}条《${it.topic}》错/忘 ${v.count} 次`;
+      }).join('；')}。`);
+    }
+    const focusIds = [...new Set([
+      ...wrong.slice(0, 3).map(([id]) => id),
+      ...attempts.filter(a => a.score < 60).slice(0, 2).map(a => a.id)
+    ])].slice(0, 4);
+    if (focusIds.length) {
+      lines.push(`重点原文：${focusIds.map(id => {
+        const it = BY_ID[id];
+        return `第${it.n}条《${it.topic}》${it.q} 答案：${it.a.slice(0, 220)}`;
+      }).join('；')}。`);
+    }
+    lines.push(`题库索引：${ITEMS.map(x => `${x.n}.${x.topic}`).join('；')}。`);
+    if (coachFocus && BY_ID[coachFocus.id]) {
+      const it = BY_ID[coachFocus.id];
+      lines.push(`当前关注题目：第${it.n}条《${it.topic}》${it.q}；标准答案：${it.a}；本次得分：${coachFocus.score == null ? '—' : coachFocus.score}；漏写：${(coachFocus.missing || []).join('、') || '无'}。`);
+    }
+    return lines.join('\n');
+  }
+  function coachSystemPrompt() {
+    return `你是“理论记忆”的理论学习教练。根据用户的学习数据和题库原文，帮助分析错误、整理易混点、安排复习。
+规则：
+1. 优先使用给出的题库原文和学习数据；题库没有的内容可以用一般知识回答，但要注明“非题库原文”，不要编造具体出处。
+2. 中文回答，先给结论，再给 2-4 条可执行建议，控制在 500 字以内。
+3. 用户问薄弱点：按遗漏次数排序，指出前 3 个，并给口诀或对比记法。
+4. 用户问复习计划：按“今天/明天/3 天后”给出具体条目编号。
+5. 不要输出与问题无关的整篇题库。
+学习数据：
+${chatContext()}`;
+  }
+  function chatWelcomeHTML() {
+    return `<div class="chat-welcome">
+      <div class="chat-orb">理</div>
+      <h2>今天想解决什么？</h2>
+      <p>我可以结合你的默写分数、漏写要点和错题，帮你找出薄弱点、对比易混概念、安排复习。</p>
+    </div>`;
+  }
+  function chatMsgHTML(m, i) {
+    if (m.role === 'user') {
+      return `<div class="msg user"><div class="bubble">${esc(m.content).replace(/\n/g, '<br>')}</div></div>`;
+    }
+    const body = m.content
+      ? `<div class="bubble md ${m.error ? 'err' : ''}">${mdLite(m.content)}</div>`
+      : `<div class="bubble"><div class="typing"><i></i><i></i><i></i></div></div>`;
+    return `<div class="msg ai">
+      <div class="msg-avatar">AI</div>
+      <div class="msg-main">
+        ${body}
+        <div class="msg-tools"><span>${m.local ? '本地诊断' : (m.error ? '请求失败' : 'AI 教练')}</span>${m.error ? '<button data-action="chat-local">用本地诊断</button>' : ''}${m.content ? `<button data-action="chat-copy" data-i="${i}">复制</button>` : ''}</div>
+      </div>
+    </div>`;
+  }
+  function chatHTML() {
+    const hasKey = !!state.settings.ai.key.trim();
+    const focus = coachFocus && BY_ID[coachFocus.id] ? BY_ID[coachFocus.id] : null;
+    return `<div class="chat-page">
+      <div class="chat-head">
+        <div><h1>AI 教练</h1><p>结合你的默写记录做分析</p></div>
+        <div class="chat-head-actions">
+          <button class="icon-btn" data-action="chat-clear" title="清空对话">${ico('trash')}</button>
+          <button class="icon-btn" data-action="ai-settings" title="AI 设置">${ico('target')}</button>
+        </div>
+      </div>
+      <div class="chat-context">已带入：已学 ${learnedCount()}/95 · 最近 ${state.attempts.length} 次默写 · ${topWeak(8).length} 个薄弱要点</div>
+      ${focus ? `<div class="chat-focus">正在分析：第 ${focus.n} 条 · ${esc(focus.topic)} <button data-action="chat-focus-clear">×</button></div>` : ''}
+      <div class="chat-messages" id="chatMessages">
+        ${state.chat.length ? state.chat.map((m, i) => chatMsgHTML(m, i)).join('') : chatWelcomeHTML()}
+      </div>
+      ${hasKey ? '' : `<div class="chat-setup">
+        <b>还没有配置 AI Key</b>
+        <span>配置后可自由问答；也可以先用本地诊断，完全不联网。</span>
+        <div><button class="btn btn-sm btn-primary" data-action="ai-settings">去配置</button><button class="btn btn-sm" data-action="chat-local">本地诊断</button></div>
+      </div>`}
+      <div class="chat-quick">
+        <button class="quick-chip local" data-action="chat-local">本地诊断</button>
+        ${QUICK_PROMPTS.map(q => `<button class="quick-chip" data-action="chat-quick" data-q="${encodeURIComponent(q)}">${esc(q)}</button>`).join('')}
+      </div>
+      <div class="chat-composer">
+        <textarea id="chatInput" rows="1" placeholder="问我：我哪里最薄弱？最近错题怎么补？" ${chatBusy ? 'disabled' : ''}>${esc(chatDraft)}</textarea>
+        <button class="chat-send ${chatBusy ? 'stop' : ''}" data-action="${chatBusy ? 'chat-stop' : 'chat-send'}">${chatBusy ? '停止' : '发送'}</button>
+      </div>
+      <div class="chat-foot">AI 会读取本机学习记录；回答仅供复习参考。</div>
+    </div>`;
+  }
+  function scrollChat() {
+    const el = $('#chatMessages');
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+  function renderChatPage() {
+    if (currentTab !== 'chat') return;
+    view.innerHTML = chatHTML();
+    const ta = $('#chatInput');
+    if (ta) {
+      autoGrowChat(ta);
+      ta.addEventListener('input', () => { chatDraft = ta.value; autoGrowChat(ta); });
+      ta.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(ta.value); }
+      });
+    }
+    scrollChat();
+  }
+  function autoGrowChat(el) {
+    el.style.height = 'auto';
+    el.style.height = `${clamp(el.scrollHeight, 44, 120)}px`;
+  }
+  async function streamChat(messages, onDelta, signal) {
+    const base = aiEndpoint();
+    let resp;
+    try {
+      resp = await fetch(base, {
+        method: 'POST',
+        headers: aiHeaders(),
+        body: JSON.stringify({
+          model: state.settings.ai.model.trim(),
+          messages,
+          stream: true,
+          temperature: 0.6,
+          max_tokens: 1400
+        }),
+        signal
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      throw new Error('网络请求失败：可能是接口不支持浏览器直连（CORS）或网络不通');
+    }
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '');
+      throw apiError(resp.status, t);
+    }
+    const ct = resp.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      const data = await resp.json();
+      const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
+      if (text) onDelta(text);
+      return;
+    }
+    const reader = resp.body?.getReader();
+    if (!reader) throw new Error('接口没有返回可读取的数据流');
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n');
+      buf = parts.pop() || '';
+      for (const line of parts) {
+        const l = line.trim();
+        if (!l.startsWith('data:')) continue;
+        const data = l.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const j = JSON.parse(data);
+          const delta = j.choices?.[0]?.delta?.content || j.choices?.[0]?.message?.content || '';
+          if (delta) onDelta(delta);
+        } catch (e) { /* ignore malformed keep-alives */ }
+      }
+    }
+  }
+  function updateChatBubble(msg) {
+    const bubbles = document.querySelectorAll('#chatMessages .msg.ai .bubble');
+    const el = bubbles[bubbles.length - 1];
+    if (!el) return;
+    el.classList.add('md');
+    el.innerHTML = mdLite(msg.content);
+    scrollChat();
+  }
+  async function sendChat(text) {
+    if (chatBusy) return;
+    const content = String(text || '').trim();
+    if (!content) return;
+    if (!state.settings.ai.key.trim()) {
+      chatDraft = content;
+      renderChatPage();
+      toast('先配置 Key，或点“本地诊断”');
+      return;
+    }
+    const history = state.chat.filter(m => m.content && (m.role === 'user' || m.role === 'assistant')).slice(-8);
+    state.chat.push({ role: 'user', content, at: Date.now() });
+    const assistant = { role: 'assistant', content: '', at: Date.now(), streaming: true };
+    state.chat.push(assistant);
+    state.chat = state.chat.slice(-40);
+    chatDraft = '';
+    chatBusy = true;
+    chatController = new AbortController();
+    save();
+    renderChatPage();
+    const msgs = [
+      { role: 'system', content: coachSystemPrompt() },
+      ...history.map(m => ({ role: m.role, content: m.content })),
+      { role: 'user', content }
+    ];
+    try {
+      await streamChat(msgs, delta => {
+        assistant.content += delta;
+        updateChatBubble(assistant);
+      }, chatController.signal);
+      if (!assistant.content) throw new Error('接口没有返回文本内容');
+      assistant.streaming = false;
+    } catch (e) {
+      assistant.streaming = false;
+      if (e.name === 'AbortError') {
+        assistant.content += (assistant.content ? '\n\n' : '') + '（已停止）';
+      } else {
+        assistant.error = true;
+        assistant.content = `请求失败：${e.message || String(e)}`;
+      }
+    } finally {
+      chatBusy = false;
+      chatController = null;
+      state.chat = state.chat.slice(-40);
+      save();
+      renderChatPage();
+    }
+  }
+  function stopChat() {
+    if (chatController) chatController.abort();
+  }
+  function localDiagnosisText() {
+    const learned = learnedCount();
+    const avg = avgScore();
+    const st = streak();
+    const p = plan();
+    const weak = topWeak(6);
+    const wrong = Object.entries(state.wrong)
+      .filter(([id, v]) => v?.count > 0 && BY_ID[id])
+      .sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
+      .slice(0, 6);
+    const low = state.attempts.filter(a => a.score < 75).slice(0, 6);
+    const lines = ['本地诊断（不调用 AI）', ''];
+    lines.push(`学习概览：已学 ${learned}/95，平均 ${avg || '—'} 分，连续 ${st} 天；今天还有 ${p.due + p.fresh} 条（复习 ${p.due} + 新学 ${p.fresh}）。`);
+    if (!learned && !state.attempts.length) {
+      lines.push('还没有默写记录，建议先完成今天的默写任务，再来看诊断。');
+      return lines.join('\n');
+    }
+    if (weak.length) {
+      lines.push('', '最常漏的要点：');
+      weak.forEach((w, i) => lines.push(`${i + 1}. ${w.key}（漏 ${w.miss} 次，命中率 ${Math.round(w.acc * 100)}%）`));
+    }
+    if (low.length) {
+      lines.push('', '最近低分：');
+      low.forEach(a => {
+        const it = BY_ID[a.id];
+        lines.push(`- 第${it.n}条《${it.topic}》${a.skipped ? '未作答' : a.score + '分'}${a.missing?.length ? '，漏：' + a.missing.slice(0, 3).join('、') : ''}`);
+      });
+    }
+    if (wrong.length) {
+      lines.push('', '错题本：');
+      wrong.forEach(([id, v]) => {
+        const it = BY_ID[id];
+        lines.push(`- 第${it.n}条《${it.topic}》错/忘 ${v.count} 次`);
+      });
+    }
+    lines.push('', '建议：');
+    const first = wrong[0]?.[0] || low[0]?.id;
+    if (first) {
+      const it = BY_ID[first];
+      lines.push(`1. 今天先重默第${it.n}条《${it.topic}》，写完对照红色漏写处。`);
+    } else {
+      lines.push('1. 今天先完成今日默写，优先新学条目。');
+    }
+    if (weak[0]) lines.push(`2. 把「${weak[0].key}」和它的相关条目放在一起对比，用「易混淆/相关」入口看区别。`);
+    else lines.push('2. 每道题先复述骨架，再逐字默写。');
+    lines.push('3. 明天用「已学抽背」抽 10 条，后天用「错题重默」收口。');
+    return lines.join('\n');
+  }
+  function localDiagnosis() {
+    if (chatBusy) return;
+    state.chat.push({ role: 'assistant', content: localDiagnosisText(), at: Date.now(), local: true });
+    state.chat = state.chat.slice(-40);
+    save();
+    renderChatPage();
+  }
+  function askCoach(id) {
+    const item = BY_ID[id];
+    if (!item) return;
+    if (session && !session.finished && session.current?.id === id) {
+      toast('先完成本题评级，再去问答页分析');
+      return;
+    }
+    const active = session;
+    if (active) closeSession(true);
+    closeSheet();
+    let score = null, missing = [];
+    if (active && active.result && active.current?.id === id) {
+      score = active.result.score;
+      missing = active.result.missing.map(k => k.t);
+    } else {
+      const a = lastAttempt(id);
+      if (a) { score = a.score; missing = a.missing || []; }
+    }
+    coachFocus = { id, score, missing };
+    const prompt = `请分析第${item.n}条《${item.topic}》这次默写：${score == null ? '还没有默写记录' : `得分 ${score}`}${missing.length ? `，漏写/未命中：${missing.join('、')}` : ''}。请指出问题、给出记忆方法，并列出 2 个最容易混的相关条目。`;
+    currentTab = 'chat';
+    if (state.settings.ai.key.trim()) {
+      chatDraft = '';
+      render();
+      setTimeout(() => sendChat(prompt), 120);
+    } else {
+      chatDraft = prompt;
+      render();
+      toast('先配置 Key，或点“本地诊断”');
+    }
+  }
+  function clearChat() {
+    if (chatBusy) stopChat();
+    if (!confirm('清空对话记录？学习记录不受影响。')) return;
+    state.chat = [];
+    coachFocus = null;
+    chatDraft = '';
+    save();
+    renderChatPage();
+  }
+  function copyChat(i) {
+    const msg = state.chat[i];
+    if (!msg?.content) return;
+    navigator.clipboard?.writeText(msg.content).then(() => toast('已复制')).catch(() => toast('复制失败'));
+  }
+
   function homeHTML() {
     const day = getDay();
     const p = plan();
@@ -955,7 +1343,7 @@
     <div class="section-title"><h2>设置</h2><span>按自己的节奏</span></div>
     <div class="card settings-card">
       <button class="set-action" data-action="settings-open"><span>复习计划与外观</span><span class="chev">${ico('chevron')}</span></button>
-      <button class="set-action" data-action="ai-settings"><span>AI 深度点评 <span class="pill ${state.settings.ai.key ? 'green' : ''}">${state.settings.ai.key ? (aiOn ? '自动' : '已配置') : '未配置'}</span></span><span class="chev">${ico('chevron')}</span></button>
+      <button class="set-action" data-action="ai-settings"><span>AI 教练与点评 <span class="pill ${state.settings.ai.key ? 'green' : ''}">${state.settings.ai.key ? (aiOn ? '自动' : '已配置') : '未配置'}</span></span><span class="chev">${ico('chevron')}</span></button>
       <button class="set-action" data-action="export"><span>导出备份</span><span class="chev">${ico('download')}</span></button>
       <button class="set-action" data-action="import"><span>导入备份</span><span class="chev">${ico('upload')}</span></button>
       <button class="set-action" data-action="about-open"><span>关于与数据来源</span><span class="chev">${ico('info')}</span></button>
@@ -970,8 +1358,10 @@
     applyTheme();
     streakChip();
     $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === currentTab));
+    document.body.classList.toggle('chat-open', currentTab === 'chat');
     if (currentTab === 'home') view.innerHTML = homeHTML();
     else if (currentTab === 'practice') view.innerHTML = practiceHTML();
+    else if (currentTab === 'chat') renderChatPage();
     else if (currentTab === 'library') {
       view.innerHTML = libraryHTML();
       refreshLibCount();
@@ -989,6 +1379,7 @@
 
   /* ---------------------------------------------------------------- sheets */
   function openSheet(html) {
+    toastEl.classList.remove('show');
     sheet.innerHTML = `<div class="sheet-handle"></div>${html}`;
     sheet.classList.add('open');
     backdrop.classList.add('open');
@@ -998,7 +1389,10 @@
     if (document.getElementById('aiKey')) saveAISettings();
     sheet.classList.remove('open');
     backdrop.classList.remove('open');
-    setTimeout(() => { if (!sheet.classList.contains('open')) sheet.innerHTML = ''; }, 260);
+    setTimeout(() => {
+      if (!sheet.classList.contains('open')) sheet.innerHTML = '';
+      if (currentTab === 'chat') renderChatPage();
+    }, 260);
   }
   function detailHTML(item) {
     const c = state.cards[item.id];
@@ -1028,7 +1422,8 @@
     <div class="detail-actions">
       <button class="btn btn-primary" data-action="study-one" data-id="${item.id}">${ico('pen')}默写这一条</button>
       <button class="btn" data-action="speak-detail" data-id="${item.id}">${ico('speaker')}朗读</button>
-    </div>`;
+    </div>
+    <button class="coach-entry" data-action="ask-coach" data-id="${item.id}">${ico('spark')}带着这条去问 AI 教练</button>`;
   }
   function openDetail(id) {
     const item = BY_ID[id];
@@ -1082,10 +1477,10 @@
   function aiSettingsHTML() {
     const ai = state.settings.ai;
     return `<div class="sheet-head">
-      <div><h2>AI 深度点评</h2><p>可选功能；不配置也能用本地批改</p></div>
+      <div><h2>AI 教练 / 点评</h2><p>问答与批改共用同一接口；不配置也能用本地批改</p></div>
       <button class="sheet-close" data-action="close-sheet">${ico('x')}</button>
     </div>
-    <div class="ai-note">需要自备一个可用的 API Key（有余额/额度）。Key 只保存在本机浏览器，不会写进网页代码，也不会随导出备份一起导出；请求直接发往你填写的接口。</div>
+    <div class="ai-note">需要自备一个可用的 API Key（有余额/额度）。Key 只保存在本机浏览器，不会写进网页代码，也不会随导出备份一起导出。<br><b>浏览器直连优先 SiliconFlow</b>（DeepSeek-V4.1-Flash）；OpenCode Go 的 dsv4.1-flash 需要服务端代理，浏览器直连会被 CORS 拦截。</div>
     <div class="settings-sheet">
       <h3>接口预设</h3>
       <div class="preset-row">
@@ -1093,6 +1488,7 @@
       </div>
       <label class="field"><span>Base URL</span><input id="aiBase" autocomplete="off" spellcheck="false" value="${esc(ai.baseUrl)}" placeholder="https://api.example.com/v1"></label>
       <label class="field"><span>模型</span><input id="aiModel" autocomplete="off" spellcheck="false" value="${esc(ai.model)}" placeholder="model-name"></label>
+      ${ai.preset === 'opencode' ? `<label class="field"><span>OpenCode 会话 ID</span><input id="aiSession" autocomplete="off" spellcheck="false" value="${esc(ai.sessionId || '')}" placeholder="自动生成"></label>` : ''}
       <label class="field"><span>API Key</span>
         <div class="ai-key-row"><input id="aiKey" type="password" autocomplete="off" spellcheck="false" value="${esc(ai.key)}" placeholder="sk-..."><button class="btn btn-sm" data-action="toggle-key">显示</button></div>
       </label>
@@ -1114,12 +1510,12 @@
     <div class="about">
       <p><b>这是什么</b><br>把《党的基本理论知识篇》的 95 个问答做成默写卡：先凭记忆写，再自动对照原文，标出漏写和写错的地方，给出记忆建议，并按 FSRS 安排下次复习。</p>
       <p><b>批改方式</b><br>本地批改不联网：按“字符覆盖率 + 要点命中 + 数字检查”打分，红色标出与原文文字不一致的地方。红色不一定代表意思错，只代表和原文表述不同。</p>
-      <p><b>AI 点评</b><br>可选。填入兼容 OpenAI 格式的接口地址、模型和 Key 后，可把当前题目、标准答案和你的默写发给模型做更细的点评。Key 只存本机。</p>
+      <p><b>AI 教练</b><br>可选。问答页会把学习概览、最近默写、薄弱要点和题库索引发给已配置的模型；批改页的“AI 深度点评”共用同一接口。SiliconFlow 支持浏览器直连；OpenCode Go 的 dsv4.1-flash 需要服务端代理，浏览器直连会被 CORS 拦截。Key 只存本机。</p>
       <p><b>算法</b><br>FSRS 4.5（Free Spaced Repetition Scheduler），根据“忘记 / 模糊 / 记得 / 太简单”四级评级计算稳定度和难度；本地内置的是 <a href="https://github.com/open-spaced-repetition/ts-fsrs" target="_blank" rel="noopener">ts-fsrs</a> 4.7.1 的浏览器版本。</p>
       <p><b>交互参考</b><br><span class="tag">Anki</span><span class="tag">词光 Word Atlas</span><span class="tag">qwerty-learner</span> 的每日任务、间隔复习和移动端卡片思路。</p>
       <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 95 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
-      <p><b>隐私</b><br>学习记录只存在本机 localStorage；没有账号、没有服务器。换手机或清缓存前，请在“我的”里导出备份。</p>
-      <p style="font-size:11px">版本 1.0 · 2026-11-05</p>
+      <p><b>隐私</b><br>学习记录和对话记录只存在本机 localStorage；没有账号、没有服务器。只有你点击发送时，当前题目/学习摘要和对话才会发给你配置的接口。换手机或清缓存前，请在“我的”里导出备份。</p>
+      <p style="font-size:11px">版本 1.1 · 2026-11-05</p>
     </div>`;
   }
 
@@ -1231,6 +1627,7 @@
     if (!session.finished && dirty && !confirm('退出本次默写？已完成的进度会保存。')) return;
     window.speechSynthesis?.cancel();
     speechToken++;
+    confettiEl.innerHTML = '';
     save();
     sessionEl.classList.remove('open');
     sessionEl.innerHTML = '';
@@ -1510,6 +1907,7 @@
           </div>
           <div class="summary-actions">
             ${remain ? `<button class="btn btn-primary btn-block" data-action="start-session">还有 ${remain} 条到期，继续</button>` : ''}
+            <button class="btn btn-block" data-action="chat-summary">去问答页分析本轮</button>
             <button class="btn btn-block" data-action="practice-random">随机抽背 10 题</button>
             <button class="btn btn-ghost btn-block" data-action="close-home">返回首页</button>
           </div>
@@ -1524,6 +1922,23 @@
     if (!base) throw new Error('请先填写 Base URL');
     if (!/\/chat\/completions$/.test(base)) base += '/chat/completions';
     return base;
+  }
+  function aiHeaders() {
+    const ai = state.settings.ai;
+    const h = { 'Content-Type': 'application/json' };
+    if (ai.key.trim()) h.Authorization = `Bearer ${ai.key.trim()}`;
+    if (ai.preset === 'opencode' || /opencode\.ai/.test(ai.baseUrl)) {
+      if (!ai.sessionId) ai.sessionId = (crypto.randomUUID ? crypto.randomUUID() : `sess-${Date.now()}`);
+      h['x-opencode-session'] = ai.sessionId;
+    }
+    return h;
+  }
+  function apiError(status, body) {
+    if (status === 401) return new Error('API Key 无效或已过期（401）');
+    if (status === 402) return new Error('接口账户余额不足（402），请充值或换一个 Key');
+    if (status === 403) return new Error('接口拒绝访问（403）：可能是 Key 权限、地区限制或浏览器 CORS');
+    if (status === 429) return new Error('请求太频繁（429），稍后再试');
+    return new Error(`接口 ${status}：${String(body || '').slice(0, 180)}`);
   }
   async function callAI(item, userAnswer, res) {
     const cfg = state.settings.ai;
@@ -1544,10 +1959,7 @@
     try {
       resp = await fetch(base, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${cfg.key.trim()}`
-        },
+        headers: aiHeaders(),
         body: JSON.stringify({
           model: cfg.model.trim(),
           messages: [
@@ -1566,12 +1978,8 @@
     }
     clearTimeout(timer);
     if (!resp.ok) {
-      if (resp.status === 401) throw new Error('API Key 无效或已过期（401）');
-      if (resp.status === 402) throw new Error('接口账户余额不足（402），请充值或换一个 Key');
-      if (resp.status === 403) throw new Error('接口拒绝访问（403），请检查 Key 权限或地区限制');
-      if (resp.status === 429) throw new Error('请求太频繁（429），稍后再试');
       const t = await resp.text().catch(() => '');
-      throw new Error(`接口 ${resp.status}：${t.slice(0, 180)}`);
+      throw apiError(resp.status, t);
     }
     const data = await resp.json();
     const content = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text;
@@ -1669,6 +2077,7 @@
       attempts: Array.isArray(d.attempts) ? d.attempts : [],
       weak: d.weak || {},
       wrong: d.wrong || {},
+      chat: Array.isArray(d.chat) ? d.chat.slice(-40) : [],
       settings: {
         ...base.settings,
         ...(d.settings || {}),
@@ -1761,6 +2170,38 @@
       case 'related-study':
         relatedStudy(id);
         break;
+      case 'chat-send':
+        sendChat($('#chatInput')?.value || '');
+        break;
+      case 'chat-summary':
+        closeSession(true);
+        currentTab = 'chat';
+        coachFocus = null;
+        chatDraft = '请根据我最近的默写记录，分析这轮的主要问题，并给出下一步复习建议。';
+        render();
+        break;
+      case 'chat-stop':
+        stopChat();
+        break;
+      case 'chat-local':
+        localDiagnosis();
+        break;
+      case 'chat-quick':
+        sendChat(decodeURIComponent(el.dataset.q || ''));
+        break;
+      case 'chat-clear':
+        clearChat();
+        break;
+      case 'chat-copy':
+        copyChat(Number(el.dataset.i));
+        break;
+      case 'chat-focus-clear':
+        coachFocus = null;
+        renderChatPage();
+        break;
+      case 'ask-coach':
+        askCoach(id);
+        break;
       case 'close-sheet':
         closeSheet();
         break;
@@ -1805,6 +2246,9 @@
         state.settings.ai.preset = el.dataset.preset;
         if (p.baseUrl) state.settings.ai.baseUrl = p.baseUrl;
         if (p.model) state.settings.ai.model = p.model;
+        if (el.dataset.preset === 'opencode' && !state.settings.ai.sessionId) {
+          state.settings.ai.sessionId = (crypto.randomUUID ? crypto.randomUUID() : `sess-${Date.now()}`);
+        }
         save();
         openAiSettings();
         break;
@@ -1909,6 +2353,8 @@
     if (base) state.settings.ai.baseUrl = base.value.trim();
     if (model) state.settings.ai.model = model.value.trim();
     if (key) state.settings.ai.key = key.value.trim();
+    const sess = document.getElementById('aiSession');
+    if (sess) state.settings.ai.sessionId = sess.value.trim();
     save();
   }
 
@@ -1936,6 +2382,12 @@
   window.addEventListener('offline', () => toast('当前离线，默写和本地批改仍可用'));
 
   /* ---------------------------------------------------------------- startup */
+  function setAppVH() {
+    document.documentElement.style.setProperty('--app-vh', `${(window.visualViewport?.height || window.innerHeight)}px`);
+  }
+  window.visualViewport?.addEventListener('resize', setAppVH);
+  window.addEventListener('resize', setAppVH);
+  setAppVH();
   engine = makeEngine();
   applyTheme();
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => {
