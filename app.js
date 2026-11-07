@@ -7,6 +7,9 @@
   const TOTAL = ITEMS.length;
   const DEF_ITEMS = ITEMS.filter(x => x.defense);
   const DEF_GROUPS = (DECK.meta.defense && DECK.meta.defense.groups) || [];
+  const DEF_ORDER = (DECK.meta.defense && DECK.meta.defense.order) || DEF_ITEMS.map(x => x.id);
+  const NUM_ORDER = (DECK.meta.defense && DECK.meta.defense.numericOrder) || [];
+  const DEF_INDEX = Object.fromEntries(DEF_ORDER.map((id, i) => [id, i]));
   const LS_KEY = 'theory_recall_v1';
   const RING_C = 2 * Math.PI * 52;
   const NUM_RE = /(?:\d{1,4}|[〇一二三四五六七八九十百]{1,6})年|(?:[〇一二三四五六七八九十百]{1,3}|\d{1,2})个月|本世纪中叶/g;
@@ -133,7 +136,7 @@
       weak: {},
       wrong: {},
       chat: [],
-      defense: { boost: {}, aiMonitor: true, stats: { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 } },
+      defense: { boost: {}, aiMonitor: true, cursor: 0, review: {}, stats: { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 } },
       deckCount: TOTAL,
       settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
       created: Date.now()
@@ -199,6 +202,7 @@
           ...base.defense,
           ...(d.defense || {}),
           boost: { ...(base.defense.boost || {}), ...((d.defense || {}).boost || {}) },
+          review: { ...(base.defense.review || {}), ...((d.defense || {}).review || {}) },
           stats: { ...(base.defense.stats || {}), ...((d.defense || {}).stats || {}) }
         },
         settings: {
@@ -1149,32 +1153,12 @@ ${chatContext()}`;
     }
     return usable[usable.length - 1];
   }
-  function defensePickStart(pool) {
-    const list = (pool && pool.length ? pool : DEF_ITEMS);
-    return pickDefenseWeighted(list, 1).id;
-  }
-  function defensePickNext(currentId, recent) {
-    const cur = BY_ID[currentId];
-    if (!cur) return defensePickStart(DEF_ITEMS);
-    const recentSet = new Set((recent || []).slice(-5));
-    const peers = (cur.defensePeers || []).map(p => BY_ID[p.id]).filter(Boolean);
-    const relIds = new Set((cur.related || []).map(r => r.id));
-    const related = peers.filter(p => relIds.has(p.id));
-    const same = peers.filter(p => !relIds.has(p.id));
-    const groupPeers = DEF_ITEMS.filter(x => x.id !== currentId && x.defenseGroup === cur.defenseGroup);
-    const usable = list => {
-      const fresh = list.filter(x => !recentSet.has(x.id));
-      return fresh.length ? fresh : list;
-    };
-    if (related.length) return pickDefenseWeighted(usable(related), 3.0).id;
-    if (same.length) return pickDefenseWeighted(usable(same), 1.2).id;
-    if (groupPeers.length) return pickDefenseWeighted(usable(groupPeers), 0.9).id;
-    return pickDefenseWeighted(usable(DEF_ITEMS.filter(x => x.id !== currentId)), 0.5).id;
-  }
   function defenseFiltered() {
     let pool = DEF_ITEMS.slice();
     if (defenseFilter === 'short') pool = pool.filter(x => (x.defenseWeight || 1) >= 4);
+    else if (defenseFilter === 'numeric') pool = pool.filter(x => x.defenseNumeric);
     else if (defenseFilter === 'boost') pool = pool.filter(x => state.defense.boost[x.id]);
+    else if (defenseFilter === 'review') pool = pool.filter(x => state.defense.review[x.id]);
     else if (defenseFilter === 'wrong') pool = pool.filter(x => (state.wrong[x.id]?.count || 0) > 0 || (lastAttempt(x.id)?.score || 100) < 60);
     return pool;
   }
@@ -1183,10 +1167,13 @@ ${chatContext()}`;
     const wrong = state.wrong[item.id]?.count || 0;
     const last = lastAttempt(item.id);
     const hot = (item.defenseWeight || 1) >= 4;
+    const review = state.defense.review[item.id];
     return `<button class="def-card ${boost ? 'boosted' : ''}" data-action="defense-card" data-id="${item.id}">
       <span class="def-card-top">
         <span class="def-num">${item.n}</span>
         ${hot ? '<span class="def-badge hot">高频</span>' : ''}
+        ${item.defenseNumeric ? '<span class="def-badge num">数字</span>' : ''}
+        ${review ? '<span class="def-badge review">回看</span>' : ''}
         ${boost ? '<span class="def-badge boost">★</span>' : ''}
         ${wrong ? `<span class="def-badge wrong">错${wrong}</span>` : ''}
       </span>
@@ -1194,58 +1181,101 @@ ${chatContext()}`;
       <span class="def-meta">答案 ${item.a.length} 字${last ? ` · 上次 ${last.score} 分` : ''}</span>
     </button>`;
   }
+  function reviewOrder() {
+    return Object.entries(state.defense.review || {})
+      .filter(([id, v]) => BY_ID[id]?.defense && (v.priority || 0) > 0)
+      .sort((a, b) => ((b[1].priority || 0) - (a[1].priority || 0)) ||
+        (defenseWeight(BY_ID[b[0]]) - defenseWeight(BY_ID[a[0]])) ||
+        (BY_ID[a[0]].n - BY_ID[b[0]].n))
+      .map(([id]) => id);
+  }
+  function addDefenseReview(id, priority, score) {
+    if (!BY_ID[id]?.defense) return;
+    const r = state.defense.review[id] || { priority: 0, score: 0, at: 0 };
+    r.priority = Math.max(r.priority || 0, priority);
+    r.score = score;
+    r.at = Date.now();
+    state.defense.review[id] = r;
+    save();
+  }
   function renderDefensePage() {
     if (currentTab !== 'defense') return;
     const st = state.defense.stats || { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 };
     const avg = st.scoreCount ? Math.round(st.scoreSum / st.scoreCount) : '—';
     const boostCount = Object.values(state.defense.boost || {}).filter(Boolean).length;
+    const reviewCount = reviewOrder().length;
+    const cursor = Math.min(state.defense.cursor || 0, DEF_ORDER.length);
+    const remain = Math.max(0, DEF_ORDER.length - cursor);
+    const mainLabel = cursor > 0 && cursor < DEF_ORDER.length
+      ? `继续线性过一遍 · 还剩 ${remain} 条`
+      : (cursor >= DEF_ORDER.length && DEF_ORDER.length ? `重新线性过一遍 · ${DEF_ORDER.length} 题` : `按顺序过一遍 · ${DEF_ORDER.length} 题`);
     const pool = defenseFiltered();
     const groups = DEF_GROUPS.map(g => ({
       name: g.name,
       items: pool.filter(x => x.defenseGroup === g.name)
         .sort((a, b) => ((b.defenseWeight || 1) - (a.defenseWeight || 1)) || (a.n - b.n))
     })).filter(g => g.items.length);
-    const filterDefs = [['all', '全部'], ['short', '高频短答'], ['boost', '加频'], ['wrong', '错题']];
+    const filterDefs = [['all', '全部'], ['short', '高频短答'], ['numeric', '数字分类'], ['boost', '加频'], ['review', '待回看'], ['wrong', '错题']];
     view.innerHTML = `<div class="def-head">
       <button class="back-link" data-action="tab" data-tab="practice">← 返回训练</button>
       <h1>答辩模式</h1>
-      <p>答辩题池 ${DEF_ITEMS.length} 条 · 短答案高频 · 关联链连续默写</p>
+      <p>答辩题池 ${DEF_ITEMS.length} 条 · 线性穿插 · 每题一次 · 错题回看</p>
     </div>
     <div class="def-summary">
       <div><b>${DEF_ITEMS.length}</b><span>题池</span></div>
       <div><b>${st.total || 0}</b><span>累计答辩</span></div>
       <div class="gold"><b>${avg}</b><span>平均分</span></div>
-      <div class="red"><b>${boostCount}</b><span>加频题</span></div>
+      <div class="red"><b>${reviewCount}</b><span>待回看</span></div>
     </div>
-    <button class="btn btn-primary btn-block def-start" data-action="defense-start">按关联链开始 · 不限题数</button>
+    <button class="btn btn-primary btn-block def-start" data-action="defense-start">${mainLabel}</button>
+    <button class="btn btn-gold btn-block def-numeric-btn" data-action="defense-numeric">数字分类速过 · 四个全面 / 四风 / 四个意识…</button>
     <div class="def-tools">
+      <button class="btn btn-sm" data-action="defense-short">高频短答快刷</button>
       <button class="btn btn-sm" data-action="defense-random">随机一条</button>
       <label class="def-ai-toggle"><span>AI 监测${state.settings.ai.key ? '' : '（本地）'}</span><input type="checkbox" id="defenseAI" ${state.defense.aiMonitor ? 'checked' : ''}></label>
     </div>
+    ${reviewCount ? `<button class="def-review-banner" data-action="defense-review">待回看 ${reviewCount} 条 · 跑完新题后再回看 →</button>` : ''}
     <div class="filters">${filterDefs.map(([k, n]) => `<button class="filter ${defenseFilter === k ? 'active' : ''}" data-action="defense-filter" data-filter="${k}">${n}</button>`).join('')}</div>
-    <div class="def-note">点任意题目开始；答完自动进入下一道关联题。答案短的题权重更高，标★的题会额外加频。</div>
+    <div class="def-note">线性过一遍：每题只出现一次，按关联组轮转穿插；错题不打断，进入本轮结束后的回看队列。数字分类建议先点上面的“数字分类速过”。</div>
     ${groups.length ? groups.map(g => `<div class="def-group">
       <div class="def-group-head"><h3>${esc(g.name)}</h3><span>${g.items.length} 条</span></div>
       <div class="def-grid">${g.items.map(defenseCardHTML).join('')}</div>
     </div>`).join('') : `<div class="empty">${ico('search')}<div>这个筛选下没有题目</div></div>`}
-    <div class="foot-note">答辩题池来自你提供的《精简版答辩背诵》；默写记录与主题库共用。</div>`;
+    <div class="foot-note">答辩题池来自你提供的《精简版答辩背诵》；默写记录与主题库共用。加频 ${boostCount} 条。</div>`;
   }
-  function startDefense(id) {
-    const item = BY_ID[id];
-    if (!item) return;
+  function startDefense(id, opts = {}) {
+    const mode = opts.review ? 'defense-review' : opts.numeric ? 'defense-numeric' : opts.short ? 'defense-short' : 'defense';
+    let order;
+    if (opts.review) order = reviewOrder();
+    else if (opts.numeric) order = NUM_ORDER.slice();
+    else if (opts.short) order = DEF_ORDER.filter(x => BY_ID[x] && (BY_ID[x].defenseWeight || 1) >= 4);
+    else order = DEF_ORDER.slice();
+    if (!order.length) {
+      toast(opts.review ? '还没有待回看的题' : opts.numeric ? '没有数字分类题' : '没有可默写的题');
+      return;
+    }
+    let start = 0;
+    if (id) {
+      const i = order.indexOf(id);
+      if (i >= 0) start = i;
+    } else if (mode === 'defense') {
+      const cur = state.defense.cursor || 0;
+      if (cur >= order.length) state.defense.cursor = 0;
+      start = state.defense.cursor;
+    }
+    const ids = order.slice(start);
+    if (!ids.length) return;
     if (session) { sessionEl.classList.remove('open'); session = null; }
     session = {
-      mode: 'defense',
-      queue: [],
-      total: 0,
+      mode,
+      queue: ids.slice(1).map(x => ({ id: x, isNew: isNew(x) })),
+      total: ids.length,
       done: 0,
       replay: [],
-      current: { id, isNew: isNew(id) },
-      lastId: id,
-      recent: [id],
+      current: { id: ids[0], isNew: isNew(ids[0]) },
       start: Date.now(),
       cardStart: Date.now(),
-      userAnswer: state.drafts[id] || '',
+      userAnswer: state.drafts[ids[0]] || '',
       submitted: false,
       result: null,
       suggested: null,
@@ -1320,7 +1350,7 @@ ${chatContext()}`;
     </div>
     <button class="defense-banner" data-action="open-defense">
       <span class="defense-banner-icon">${ico('trophy')}</span>
-      <span class="defense-banner-main"><b>答辩模式</b><span>关联链反复默写 · 短答案高频 · AI 监测</span></span>
+      <span class="defense-banner-main"><b>答辩模式</b><span>线性穿插 · 每题一次 · 错题回看</span></span>
       <span class="defense-banner-cta">进入</span>
     </button>
     <div class="section-title"><h2>今日安排</h2><span>${remain ? '按计划来' : '已完成'}</span></div>
@@ -1376,7 +1406,7 @@ ${chatContext()}`;
     <div class="mode-grid">
       <button class="mode-card defense-entry" data-action="open-defense">
         <span class="mode-ico gold">${ico('trophy')}</span>
-        <span class="mode-main"><h3>答辩模式</h3><p>答辩题池 ${DEF_ITEMS.length} 条 · 按关联链反复默写</p><span class="rec">短答案高频 · 可手动加频</span></span>
+        <span class="mode-main"><h3>答辩模式</h3><p>答辩题池 ${DEF_ITEMS.length} 条 · 线性穿插 · 每题一次</p><span class="rec">短答案高频 · 可手动加频</span></span>
         <span class="chev">${ico('chevron')}</span>
       </button>
       <button class="mode-card" data-action="start-session">
@@ -1717,13 +1747,13 @@ ${chatContext()}`;
     <div class="about">
       <p><b>这是什么</b><br>把两份最新版文档合并去重后的 ${TOTAL} 个问答做成默写卡：先凭记忆写，再自动对照原文，标出漏写和写错的地方，给出记忆建议，并按 FSRS 安排下次复习。</p>
       <p><b>批改方式</b><br>本地批改不联网：按“字符覆盖率 + 要点命中 + 数字检查”打分，红色标出与原文文字不一致的地方。红色不一定代表意思错，只代表和原文表述不同。</p>
-      <p><b>答辩模式</b><br>从精简版答辩题池中按关联链连续抽题，短答案权重更高；可手动加频。答错时先显示本地关联记忆点，配置 Key 后 AI 会逐条对比关联条目并给记忆锚点。</p>
+      <p><b>答辩模式</b><br>从精简版答辩题池中按线性顺序穿插抽题，每题只出现一次；短答案排在前面，并可单独快刷。答错时先显示本地关联记忆点，配置 Key 后 AI 会逐条对比关联条目，并判断是否放入本轮结束后的回看队列。</p>
       <p><b>AI 教练</b><br>可选。问答页会把学习概览、最近默写、薄弱要点和题库索引发给已配置的模型；批改页的“AI 深度点评”共用同一接口。SiliconFlow 支持浏览器直连；OpenCode Go 的 dsv4.1-flash 需要服务端代理，浏览器直连会被 CORS 拦截。Key 只存本机。</p>
       <p><b>算法</b><br>FSRS 4.5（Free Spaced Repetition Scheduler），根据“忘记 / 模糊 / 记得 / 太简单”四级评级计算稳定度和难度；本地内置的是 <a href="https://github.com/open-spaced-repetition/ts-fsrs" target="_blank" rel="noopener">ts-fsrs</a> 4.7.1 的浏览器版本。</p>
       <p><b>交互参考</b><br><span class="tag">Anki</span><span class="tag">词光 Word Atlas</span><span class="tag">qwerty-learner</span> 的每日任务、间隔复习和移动端卡片思路。</p>
       <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 ${TOTAL} 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
       <p><b>隐私</b><br>学习记录和对话记录只存在本机 localStorage；没有账号、没有服务器。只有你点击发送时，当前题目/学习摘要和对话才会发给你配置的接口。换手机或清缓存前，请在“我的”里导出备份。</p>
-      <p style="font-size:11px">版本 2.1 · 2026-11-07</p>
+      <p style="font-size:11px">版本 2.2 · 2026-11-07</p>
     </div>`;
   }
 
@@ -1816,17 +1846,6 @@ ${chatContext()}`;
   }
   function nextCard() {
     if (!session) return;
-    if (session.mode === 'defense') {
-      const nextId = defensePickNext(session.lastId, session.recent);
-      if (!nextId) return;
-      session.lastId = nextId;
-      session.recent.push(nextId);
-      if (session.recent.length > 6) session.recent.shift();
-      resetCardFields(nextId);
-      renderStudy();
-      sessionEl.scrollTop = 0;
-      return;
-    }
     if (!session.queue.length) {
       if (session.replay.length) {
         const r = session.replay.shift();
@@ -1846,7 +1865,7 @@ ${chatContext()}`;
 
   function closeSession(goHome = false) {
     if (!session) return;
-    const wasDefense = session.mode === 'defense';
+    const wasDefense = session.mode.startsWith('defense');
     const dirty = session.done > 0 || (session.userAnswer || '').trim() || session.submitted;
     if (!session.finished && dirty && !confirm('退出本次默写？已完成的进度会保存。')) return;
     if (session.defenseAIAbort) { try { session.defenseAIAbort.abort(); } catch (e) { /* ignore */ } }
@@ -1875,7 +1894,11 @@ ${chatContext()}`;
     session.suggested = skipped ? 1 : scoreToRating(result.score);
     delete state.drafts[item.id];
     recordAttempt(item, result, skipped);
-    if (session.mode === 'defense') {
+    const defMode = session.mode.startsWith('defense');
+    if (defMode && result.score < 75) {
+      addDefenseReview(item.id, result.score < 40 ? 3 : result.score < 60 ? 2 : 1, result.score);
+    }
+    if (defMode) {
       if (state.defense.aiMonitor && state.settings.ai.key.trim() && result.score < 75) {
         setTimeout(runDefenseAI, 50);
       }
@@ -1906,7 +1929,7 @@ ${chatContext()}`;
 
   function finishCard(rating) {
     if (!session || !session.current || !session.submitted) return;
-    const wasDefense = session.mode === 'defense';
+    const wasDefense = session.mode.startsWith('defense');
     const id = session.current.id;
     const item = BY_ID[id];
     const res = session.result;
@@ -1957,7 +1980,16 @@ ${chatContext()}`;
       ds.scoreSum = (ds.scoreSum || 0) + res.score;
       ds.scoreCount = (ds.scoreCount || 0) + 1;
       if (rating === 1 || res.score < 60) ds.wrong = (ds.wrong || 0) + 1;
-      session.lastId = id;
+      if (session.mode === 'defense') {
+        const idx = DEF_INDEX[id];
+        if (idx != null) state.defense.cursor = Math.max(state.defense.cursor || 0, idx + 1);
+      }
+      if (session.mode === 'defense-review') {
+        if (rating >= 3 && res.score >= 70) delete state.defense.review[id];
+        else addDefenseReview(id, 3, res.score);
+      } else if (rating === 1) {
+        addDefenseReview(id, 3, res.score);
+      }
     } else if (rating === 1) {
       session.replay.push({ id });
     }
@@ -1983,21 +2015,21 @@ ${chatContext()}`;
     const total = Math.max(session.total, done + session.queue.length + session.replay.length);
     const pct = total ? (done / total) * 100 : 0;
     const isReplay = !!session.current.replay;
-    const isDefense = session.mode === 'defense';
+    const isDefense = session.mode.startsWith('defense');
     const defAvg = session.defense && session.defense.scoreCount ? Math.round(session.defense.scoreSum / session.defense.scoreCount) : null;
-    const title = isDefense ? '答辩模式' : session.mode === 'srs' ? '今日默写' : session.mode === 'learned' ? '已学抽背' : session.mode === 'random' ? '随机抽背' : session.mode === 'wrong' ? '错题重默' : session.mode === 'weak' ? '薄弱专项' : '单条默写';
+    const title = session.mode === 'defense' ? '答辩模式' : session.mode === 'defense-numeric' ? '数字分类速过' : session.mode === 'defense-short' ? '高频短答快刷' : session.mode === 'defense-review' ? '错题回看' : session.mode === 'srs' ? '今日默写' : session.mode === 'learned' ? '已学抽背' : session.mode === 'random' ? '随机抽背' : session.mode === 'wrong' ? '错题重默' : session.mode === 'weak' ? '薄弱专项' : '单条默写';
     sessionEl.innerHTML = `<div class="session-shell">
       <div class="session-top">
         <button class="session-close" data-action="close-session" aria-label="退出">${ico('x')}</button>
-        ${isDefense ? `<div class="defense-chain-label">关联链 · 已默写 ${done} 题${defAvg != null ? ` · 平均 ${defAvg}` : ''}</div>` : `<div class="progress-track"><i style="width:${clamp(pct, 0, 100)}%"></i></div>`}
-        <span class="session-counter">${isDefense ? `第 ${done + 1} 题` : (isReplay ? '巩固' : `${Math.min(done + 1, total)}/${total}`)}</span>
+        <div class="progress-track"><i style="width:${clamp(pct, 0, 100)}%"></i></div>
+        <span class="session-counter">${isReplay ? '巩固' : `${Math.min(done + 1, total)}/${total}`}</span>
       </div>
       <div class="session-body ${session.submitted && !isReplay ? 'with-dock' : ''}">
         <div class="session-inner">
           <div class="study-eyebrow">
             <span class="pill">${esc(title)}</span>
             <span>第 ${item.n} 条 · ${esc(item.sec)}</span>
-            ${isDefense ? '<span class="pill gold">关联链</span>' : ''}
+            ${isDefense ? `<span class="pill gold">${session.mode === 'defense-review' ? '回看' : session.mode === 'defense-numeric' ? '数字' : session.mode === 'defense-short' ? '短答' : '线性'}</span>` : ''}
             ${isReplay ? '<span class="pill gold">再巩固</span>' : (session.current.isNew ? '<span class="pill gold">新学</span>' : '<span class="pill red">复习</span>')}
           </div>
           <div class="study-q">${esc(item.q)}</div>
@@ -2172,14 +2204,17 @@ ${chatContext()}`;
     } else {
       body = `<div class="def-ai-hint">这道题低于 75 分，AI 会自动分析；如果没开始可手动触发。</div><button class="btn btn-sm" data-action="defense-ai-run">AI 对照分析</button>`;
     }
+    const rv = state.defense.review[item.id];
+    const reviewLine = `<div class="def-review-state">${rv ? `已排入本轮后的回看（优先级 ${rv.priority}）` : '本轮不安排回看，继续新知识'}</div>`;
     return `<div class="def-ai-box" id="defenseAIBox">
       <div class="def-ai-head"><span>${hasKey && monitor ? 'AI 监测' : '关联记忆点'}</span><span>${session.defenseAILoading ? '分析中…' : (hasKey && monitor ? '实时' : '')}</span></div>
       ${defenseRelatedMemoryHTML(item)}
+      ${reviewLine}
       <div id="defenseAIText">${body}</div>
     </div>`;
   }
   async function runDefenseAI() {
-    if (!session || session.mode !== 'defense' || !session.submitted || session.current?.replay) return;
+    if (!session || !session.mode.startsWith('defense') || !session.submitted || session.current?.replay) return;
     if (!state.settings.ai.key.trim()) { toast('先配置 API Key'); openAiSettings(); return; }
     if (session.defenseAILoading) return;
     const id = session.current.id;
@@ -2198,7 +2233,8 @@ ${peerText || '无'}
 1. 我错在哪（具体到漏写的词，引用我的原话）；
 2. 和每个关联条目的区别（逐条一句话）；
 3. 3 个记忆锚点或口诀；
-4. 下一题建议。总字数不超过 350 字。`;
+4. 下一题建议。总字数不超过 350 字。
+最后单独一行输出：REVIEW: high / medium / low / none（是否需要在本轮新题跑完后回看这道题）。`;
     const ctrl = new AbortController();
     session.defenseAIAbort = ctrl;
     session.defenseAILoading = true;
@@ -2216,6 +2252,14 @@ ${peerText || '无'}
         if (el) el.innerHTML = mdLite(session.defenseAI);
       }, ctrl.signal);
       if (!session.defenseAI) throw new Error('接口没有返回文本内容');
+      const m = session.defenseAI.match(/(?:REVIEW|回看)\s*[:：]\s*(high|medium|low|none|高|中|低|不需要|不需要回看)/i);
+      if (m) {
+        const v = m[1].toLowerCase();
+        if (v === 'none' || v === '不需要' || v === '不需要回看') delete state.defense.review[id];
+        else addDefenseReview(id, (v === 'high' || v === '高') ? 3 : (v === 'medium' || v === '中') ? 2 : 1, res.score);
+        session.defenseAI = session.defenseAI.replace(/(?:REVIEW|回看)\s*[:：].*$/mi, '').trim();
+        save();
+      }
     } catch (e) {
       if (e.name !== 'AbortError' && session.current?.id === id) {
         session.defenseAIError = e.message || String(e);
@@ -2234,25 +2278,38 @@ ${peerText || '无'}
     const total = s.stats.scoreCount;
     const avg = total ? Math.round(s.stats.scoreSum / total) : 0;
     const remain = dueItems().length;
-    const title = s.mode === 'srs' ? '本轮默写完成' : s.mode === 'learned' ? '已学抽背完成' : s.mode === 'random' ? '随机抽背完成' : s.mode === 'wrong' ? '错题重默完成' : s.mode === 'weak' ? '薄弱专项完成' : '默写完成';
+    const isDefense = s.mode.startsWith('defense');
+    const reviewCount = reviewOrder().length;
+    const title = isDefense
+      ? (s.mode === 'defense-review' ? '错题回看完成' : s.mode === 'defense-numeric' ? '数字分类过完' : s.mode === 'defense-short' ? '高频短答过完' : '本轮线性过完')
+      : s.mode === 'srs' ? '本轮默写完成' : s.mode === 'learned' ? '已学抽背完成' : s.mode === 'random' ? '随机抽背完成' : s.mode === 'wrong' ? '错题重默完成' : s.mode === 'weak' ? '薄弱专项完成' : '默写完成';
+    const actions = isDefense
+      ? `<div class="summary-actions">
+          ${reviewCount ? `<button class="btn btn-primary btn-block" data-action="defense-review">回看错题 ${reviewCount} 条</button>` : ''}
+          <button class="btn btn-block" data-action="defense-numeric">数字分类速过</button>
+          <button class="btn btn-block" data-action="defense-short">高频短答快刷</button>
+          <button class="btn btn-block" data-action="defense-start">再来一轮线性</button>
+          <button class="btn btn-ghost btn-block" data-action="close-session">返回题目页</button>
+        </div>`
+      : `<div class="summary-actions">
+          ${remain ? `<button class="btn btn-primary btn-block" data-action="start-session">还有 ${remain} 条到期，继续</button>` : ''}
+          <button class="btn btn-block" data-action="chat-summary">去问答页分析本轮</button>
+          <button class="btn btn-block" data-action="practice-random">随机抽背 10 题</button>
+          <button class="btn btn-ghost btn-block" data-action="close-home">返回首页</button>
+        </div>`;
     sessionEl.innerHTML = `<div class="session-shell">
       <div class="session-top"><button class="session-close" data-action="close-session">${ico('x')}</button><div class="progress-track"><i style="width:100%"></i></div><span class="session-counter">完成</span></div>
       <div class="session-body">
         <div class="summary">
           <div class="summary-badge">${ico('trophy')}</div>
           <h2>${title}</h2>
-          <p>${s.done} 条 · 用时 ${fmtDuration(Date.now() - s.start)}</p>
+          <p>${s.done} 条 · 用时 ${fmtDuration(Date.now() - s.start)}${isDefense && reviewCount ? ` · 待回看 ${reviewCount} 条` : ''}</p>
           <div class="summary-grid">
-            <div><b>${avg || '—'}</b><span>平均得分</span></div>
+            <div><b>${total ? avg : '—'}</b><span>平均得分</span></div>
             <div><b>${s.stats.ok}/${s.done}</b><span>记得/简单</span></div>
             <div><b>${s.stats.again}</b><span>评了忘记</span></div>
           </div>
-          <div class="summary-actions">
-            ${remain ? `<button class="btn btn-primary btn-block" data-action="start-session">还有 ${remain} 条到期，继续</button>` : ''}
-            <button class="btn btn-block" data-action="chat-summary">去问答页分析本轮</button>
-            <button class="btn btn-block" data-action="practice-random">随机抽背 10 题</button>
-            <button class="btn btn-ghost btn-block" data-action="close-home">返回首页</button>
-          </div>
+          ${actions}
         </div>
       </div>
     </div>`;
@@ -2426,6 +2483,7 @@ ${peerText || '无'}
         ...base.defense,
         ...(d.defense || {}),
         boost: { ...(base.defense.boost || {}), ...((d.defense || {}).boost || {}) },
+        review: { ...(base.defense.review || {}), ...((d.defense || {}).review || {}) },
         stats: { ...(base.defense.stats || {}), ...((d.defense || {}).stats || {}) }
       },
       settings: {
@@ -2507,7 +2565,16 @@ ${peerText || '无'}
         render();
         break;
       case 'defense-start':
-        startDefense(defensePickStart(defenseFiltered()));
+        startDefense(null);
+        break;
+      case 'defense-numeric':
+        startDefense(null, { numeric: true });
+        break;
+      case 'defense-short':
+        startDefense(null, { short: true });
+        break;
+      case 'defense-review':
+        startDefense(null, { review: true });
         break;
       case 'defense-random': {
         const pool = defenseFiltered();

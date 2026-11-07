@@ -782,3 +782,10 @@ html[data-theme="dark"] .rate-dock{box-shadow:0 -10px 28px rgba(0,0,0,.3)}
 @media (max-width:330px){
   .def-grid{grid-template-columns:1fr}
 }
+
+/* linear defense additions */
+.def-numeric-btn{margin-top:8px;min-height:44px;font-size:12px;border-radius:13px}
+.def-review-banner{display:block;width:100%;text-align:left;margin-top:9px;padding:10px 12px;border-radius:12px;border:1px solid color-mix(in srgb,var(--red) 25%,var(--line));background:var(--red-soft);color:var(--red);font-size:11.5px;font-weight:650;line-height:1.5}
+.def-badge.num{background:var(--blue-soft);color:var(--blue)}
+.def-badge.review{background:var(--red-soft);color:var(--red)}
+.def-review-state{margin:7px 0 2px;padding:5px 8px;border-radius:8px;background:var(--gold-soft);color:var(--amber);font-size:10px;line-height:1.5}
