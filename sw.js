@@ -1,10 +1,11 @@
-const CACHE = 'theory-recall-v12';
+const CACHE = 'theory-recall-v13';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
   './deck.js',
+  './sprint.js',
   './fsrs.umd.js',
   './manifest.webmanifest',
   './icons/icon-192.png',

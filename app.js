@@ -10,6 +10,8 @@
   const DEF_ORDER = (DECK.meta.defense && DECK.meta.defense.order) || DEF_ITEMS.map(x => x.id);
   const NUM_ORDER = (DECK.meta.defense && DECK.meta.defense.numericOrder) || [];
   const DEF_INDEX = Object.fromEntries(DEF_ORDER.map((id, i) => [id, i]));
+  const SPRINT = window.SPRINT || { items: [], meta: {} };
+  const SPRINT_ITEMS = SPRINT.items || [];
   const LS_KEY = 'theory_recall_v1';
   const RING_C = 2 * Math.PI * 52;
   const NUM_RE = /(?:\d{1,4}|[〇一二三四五六七八九十百]{1,6})年|(?:[〇一二三四五六七八九十百]{1,3}|\d{1,2})个月|本世纪中叶/g;
@@ -45,6 +47,7 @@
   const sheet = $('#sheet');
   const backdrop = $('#backdrop');
   const sessionEl = $('#session');
+  const sprintOverlay = $('#sprintOverlay');
   const toastEl = $('#toast');
   const confettiEl = $('#confetti');
 
@@ -56,6 +59,8 @@
   let libQuery = '';
   let libFilter = 'all';
   let defenseFilter = 'all';
+  let sprintFilter = 'all';
+  let sprintRun = null;
   let deferredPrompt = null;
   let toastTimer = null;
   let aiSaveTimer = null;
@@ -137,6 +142,7 @@
       wrong: {},
       chat: [],
       defense: { boost: {}, aiMonitor: true, cursor: 0, review: {}, stats: { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 } },
+      sprint: { seen: {}, weak: {} },
       deckCount: TOTAL,
       settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
       created: Date.now()
@@ -204,6 +210,12 @@
           boost: { ...(base.defense.boost || {}), ...((d.defense || {}).boost || {}) },
           review: { ...(base.defense.review || {}), ...((d.defense || {}).review || {}) },
           stats: { ...(base.defense.stats || {}), ...((d.defense || {}).stats || {}) }
+        },
+        sprint: {
+          ...base.sprint,
+          ...(d.sprint || {}),
+          seen: { ...(base.sprint.seen || {}), ...((d.sprint || {}).seen || {}) },
+          weak: { ...(base.sprint.weak || {}), ...((d.sprint || {}).weak || {}) }
         },
         settings: {
           ...base.settings,
@@ -1299,7 +1311,202 @@ ${chatContext()}`;
     save();
     if (session && session.current?.id === id) renderStudy();
     else if (currentTab === 'defense') renderDefensePage();
+    else if (currentTab === 'sprint') renderSprintPage();
     toast(state.defense.boost[id] ? '已加高这道题的频率' : '已取消加频');
+  }
+
+  function sprintFiltered() {
+    let pool = SPRINT_ITEMS.slice();
+    if (sprintFilter === 'original') pool = pool.filter(x => x.type === 'original');
+    else if (sprintFilter === 'predict') pool = pool.filter(x => x.type === 'predict');
+    else if (sprintFilter === 'numeric') pool = pool.filter(x => x.tag === '数字');
+    else if (sprintFilter === 'current') pool = pool.filter(x => x.tag === '时政');
+    else if (sprintFilter === 'weak') pool = pool.filter(x => state.sprint.weak[x.id]);
+    return pool;
+  }
+  function sprintRowHTML(item) {
+    const seen = state.sprint.seen[item.id];
+    const weak = state.sprint.weak[item.id];
+    const probCls = item.prob === '原题' ? 'original' : item.prob === '高' ? 'high' : 'mid';
+    return `<button class="sprint-row" data-action="sprint-row" data-id="${item.id}">
+      <span class="sprint-row-top">
+        <span class="sprint-tag t-${item.tag}">${item.tag}</span>
+        <span class="sprint-prob ${probCls}">${item.prob}</span>
+        ${weak ? '<span class="sprint-status weak">不会</span>' : seen ? '<span class="sprint-status done">已过</span>' : ''}
+      </span>
+      <span class="sprint-q">${esc(item.q)}</span>
+      <span class="sprint-meta">答案 ${item.a.length} 字 · ${item.keyPoints.length} 个关键词</span>
+    </button>`;
+  }
+  function renderSprintPage() {
+    if (currentTab !== 'sprint') return;
+    const pool = sprintFiltered();
+    const seenCount = SPRINT_ITEMS.filter(x => state.sprint.seen[x.id]).length;
+    const weakCount = SPRINT_ITEMS.filter(x => state.sprint.weak[x.id]).length;
+    const logic = (SPRINT.meta && SPRINT.meta.logic) || [];
+    const filters = [['all', '全部'], ['original', '原题'], ['predict', '预测'], ['numeric', '数字分类'], ['current', '时政'], ['weak', '不会']];
+    const groups = [
+      ['上次原题', SPRINT_ITEMS.filter(x => x.type === 'original' && pool.includes(x))],
+      ['本次预测 · 高概率', SPRINT_ITEMS.filter(x => x.type === 'predict' && x.prob === '高' && pool.includes(x))],
+      ['本次预测 · 中概率', SPRINT_ITEMS.filter(x => x.type === 'predict' && x.prob === '中' && pool.includes(x))]
+    ].filter(g => g[1].length);
+    view.innerHTML = `<div class="sprint-head">
+      <button class="back-link" data-action="tab" data-tab="practice">← 返回训练</button>
+      <h1>考前冲刺</h1>
+      <p>上次原题 ${SPRINT.meta.original || 0} + 本次预测 ${SPRINT.meta.predicted || 0} · 10 分钟速览 · 不涉及个人经历</p>
+    </div>
+    <div class="sprint-summary">
+      <div><b>${SPRINT.meta.total || SPRINT_ITEMS.length}</b><span>总题</span></div>
+      <div class="gold"><b>${SPRINT.meta.original || 0}</b><span>上次原题</span></div>
+      <div class="blue"><b>${SPRINT.meta.predicted || 0}</b><span>本次预测</span></div>
+      <div class="red"><b>${weakCount}</b><span>标记不会</span></div>
+    </div>
+    <div class="sprint-actions">
+      <button class="btn btn-primary btn-block" data-action="sprint-start" data-mode="all">${ico('zap')}10 分钟速览 · 全部 ${SPRINT_ITEMS.length} 题</button>
+      <div class="sprint-action-grid">
+        <button class="btn btn-sm" data-action="sprint-start" data-mode="original">只过原题 ${SPRINT.meta.original || 0}</button>
+        <button class="btn btn-sm" data-action="sprint-start" data-mode="predict">只过预测 ${SPRINT.meta.predicted || 0}</button>
+        <button class="btn btn-sm" data-action="sprint-start" data-mode="numeric">数字分类</button>
+        <button class="btn btn-sm" data-action="sprint-start" data-mode="current">最新时政</button>
+      </div>
+    </div>
+    <div class="sprint-logic">
+      <div class="sprint-logic-head">${ico('target')}出题逻辑 / 这次怎么押</div>
+      <ul>${logic.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+    </div>
+    <div class="filters">${filters.map(([k, n]) => `<button class="filter ${sprintFilter === k ? 'active' : ''}" data-action="sprint-filter" data-filter="${k}">${n}</button>`).join('')}</div>
+    <div class="sprint-seen">已速览 ${seenCount}/${SPRINT_ITEMS.length} · 标记不会 ${weakCount} 条</div>
+    ${groups.length ? groups.map(([name, arr]) => `<div class="sprint-group">
+      <div class="sprint-group-head"><h3>${name}</h3><span>${arr.length} 条</span></div>
+      <div class="sprint-list">${arr.map(sprintRowHTML).join('')}</div>
+    </div>`).join('') : `<div class="empty">${ico('search')}<div>这个筛选下没有题目</div></div>`}
+    <div class="foot-note">预测题由上次 16 道原题的结构和 202 题库推测，不是泄题；个人经历类问题按要求未纳入。</div>`;
+  }
+  function openSprintDetail(id) {
+    const item = SPRINT_ITEMS.find(x => x.id === id);
+    if (!item) return;
+    const seen = state.sprint.seen[id];
+    const weak = state.sprint.weak[id];
+    openSheet(`<div class="sheet-head">
+      <div><h2>${item.type === 'original' ? '上次原题' : '本次预测'} · ${esc(item.tag)}</h2><p>${item.prob} · ${item.note || ''}</p></div>
+      <button class="sheet-close" data-action="close-sheet">${ico('x')}</button>
+    </div>
+    <div class="sprint-detail-q">${esc(item.q)}</div>
+    <div class="sprint-detail-a">${esc(item.a).replace(/\n/g, '<br>')}</div>
+    <div class="sprint-keys">${item.keyPoints.map(k => `<span>${esc(k)}</span>`).join('')}</div>
+    <div class="sprint-detail-status">${weak ? '标记：还不会' : seen ? '标记：已会' : '还没标记'}</div>
+    <div class="detail-actions">
+      <button class="btn" data-action="sprint-mark" data-id="${id}" data-known="0">还不会</button>
+      <button class="btn btn-primary" data-action="sprint-mark" data-id="${id}" data-known="1">会了</button>
+    </div>`);
+  }
+  function sprintMark(id, known) {
+    const item = SPRINT_ITEMS.find(x => x.id === id);
+    if (!item) return;
+    state.sprint.seen[id] = Date.now();
+    if (known) delete state.sprint.weak[id];
+    else state.sprint.weak[id] = true;
+    save();
+  }
+  function startSprintRun(items, label) {
+    if (!items.length) { toast('没有可速览的题'); return; }
+    sprintRun = { items, index: 0, revealed: false, label, known: 0, weak: 0, start: Date.now() };
+    sprintOverlay.classList.add('open');
+    renderSprintRun();
+    sprintOverlay.scrollTop = 0;
+  }
+  function sprintRunByMode(mode) {
+    let items = SPRINT_ITEMS.slice();
+    if (mode === 'original') items = items.filter(x => x.type === 'original');
+    else if (mode === 'predict') items = items.filter(x => x.type === 'predict');
+    else if (mode === 'numeric') items = items.filter(x => x.tag === '数字');
+    else if (mode === 'current') items = items.filter(x => x.tag === '时政');
+    else if (mode === 'weak') items = items.filter(x => state.sprint.weak[x.id]);
+    startSprintRun(items, mode === 'all' ? '全部速览' : mode === 'original' ? '原题速览' : mode === 'predict' ? '预测速览' : mode === 'numeric' ? '数字分类' : mode === 'current' ? '最新时政' : '不会的题');
+  }
+  function renderSprintRun() {
+    if (!sprintRun) return;
+    if (sprintRun.index >= sprintRun.items.length) { renderSprintSummary(); return; }
+    const item = sprintRun.items[sprintRun.index];
+    const total = sprintRun.items.length;
+    const pct = (sprintRun.index / total) * 100;
+    const probCls = item.prob === '原题' ? 'original' : item.prob === '高' ? 'high' : 'mid';
+    sprintOverlay.innerHTML = `<div class="sprint-shell">
+      <div class="sprint-top">
+        <button class="session-close" data-action="sprint-close">${ico('x')}</button>
+        <div class="progress-track"><i style="width:${pct}%"></i></div>
+        <span class="session-counter">${sprintRun.index + 1}/${total}</span>
+      </div>
+      <div class="sprint-body">
+        <div class="sprint-card">
+          <div class="sprint-row-top">
+            <span class="sprint-tag t-${item.tag}">${item.tag}</span>
+            <span class="sprint-prob ${probCls}">${item.prob}</span>
+            <span class="sprint-label">${esc(sprintRun.label)}</span>
+          </div>
+          <div class="sprint-q-big">${esc(item.q)}</div>
+          ${sprintRun.revealed ? `
+            <div class="sprint-answer">
+              <div class="sprint-answer-label">参考答案</div>
+              <div class="sprint-answer-text">${esc(item.a).replace(/\n/g, '<br>')}</div>
+              <div class="sprint-keys">${item.keyPoints.map(k => `<span>${esc(k)}</span>`).join('')}</div>
+              ${item.note ? `<div class="sprint-note">${esc(item.note)}</div>` : ''}
+            </div>
+            <div class="sprint-choice">
+              <button class="sprint-weak-btn" data-action="sprint-answer" data-known="0">还不会</button>
+              <button class="sprint-known-btn" data-action="sprint-answer" data-known="1">会了</button>
+            </div>` : `
+            <button class="sprint-reveal-btn" data-action="sprint-reveal">显示答案</button>
+            <div class="sprint-hint">先自己答一遍，再点显示答案</div>`}
+        </div>
+      </div>
+    </div>`;
+  }
+  function sprintReveal() {
+    if (!sprintRun) return;
+    sprintRun.revealed = true;
+    renderSprintRun();
+  }
+  function sprintAnswer(known) {
+    if (!sprintRun || !sprintRun.revealed) return;
+    const item = sprintRun.items[sprintRun.index];
+    sprintMark(item.id, !!known);
+    if (known) sprintRun.known++;
+    else sprintRun.weak++;
+    sprintRun.index++;
+    sprintRun.revealed = false;
+    renderSprintRun();
+    sprintOverlay.scrollTop = 0;
+  }
+  function renderSprintSummary() {
+    const s = sprintRun;
+    const weakItems = s.items.filter(x => state.sprint.weak[x.id]);
+    sprintOverlay.innerHTML = `<div class="sprint-shell">
+      <div class="sprint-top"><button class="session-close" data-action="sprint-close">${ico('x')}</button><div class="progress-track"><i style="width:100%"></i></div><span class="session-counter">完成</span></div>
+      <div class="sprint-body">
+        <div class="summary">
+          <div class="summary-badge">${ico('zap')}</div>
+          <h2>${esc(s.label)}完成</h2>
+          <p>${s.items.length} 题 · 用时 ${fmtDuration(Date.now() - s.start)}</p>
+          <div class="summary-grid">
+            <div><b>${s.known}</b><span>会了</span></div>
+            <div><b>${s.weak}</b><span>还不会</span></div>
+            <div><b>${weakItems.length}</b><span>待重点</span></div>
+          </div>
+          <div class="summary-actions">
+            ${weakItems.length ? `<button class="btn btn-primary btn-block" data-action="sprint-start" data-mode="weak">再速览不会的 ${weakItems.length} 题</button>` : ''}
+            <button class="btn btn-block" data-action="sprint-restart">重新速览这一组</button>
+            <button class="btn btn-ghost btn-block" data-action="sprint-close">返回冲刺页</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+  function closeSprintRun() {
+    sprintOverlay.classList.remove('open');
+    sprintOverlay.innerHTML = '';
+    sprintRun = null;
+    if (currentTab === 'sprint') renderSprintPage();
   }
 
   function homeHTML() {
@@ -1348,6 +1555,11 @@ ${chatContext()}`;
       <div class="stat-mini gold"><b>${avg || '—'}</b><span>平均得分</span></div>
       <div class="stat-mini red"><b>${st}</b><span>连续天数</span></div>
     </div>
+    <button class="sprint-banner" data-action="open-sprint">
+      <span class="sprint-banner-icon">${ico('zap')}</span>
+      <span class="sprint-banner-main"><b>考前冲刺</b><span>上次原题 ${SPRINT.meta.original || 0} + 预测 ${SPRINT.meta.predicted || 0} · 10 分钟速览</span></span>
+      <span class="sprint-banner-cta">进入</span>
+    </button>
     <button class="defense-banner" data-action="open-defense">
       <span class="defense-banner-icon">${ico('trophy')}</span>
       <span class="defense-banner-main"><b>答辩模式</b><span>线性穿插 · 每题一次 · 错题回看</span></span>
@@ -1404,6 +1616,11 @@ ${chatContext()}`;
     return `
     <div class="page-head"><h1>默写训练</h1><p>每次默写都会批改、给建议，并更新复习计划。</p></div>
     <div class="mode-grid">
+      <button class="mode-card sprint-entry" data-action="open-sprint">
+        <span class="mode-ico red">${ico('zap')}</span>
+        <span class="mode-main"><h3>考前冲刺</h3><p>上次原题 ${SPRINT.meta.original || 0} + 本次预测 ${SPRINT.meta.predicted || 0}</p><span class="rec">10 分钟速览 · 不涉及个人经历</span></span>
+        <span class="chev">${ico('chevron')}</span>
+      </button>
       <button class="mode-card defense-entry" data-action="open-defense">
         <span class="mode-ico gold">${ico('trophy')}</span>
         <span class="mode-main"><h3>答辩模式</h3><p>答辩题池 ${DEF_ITEMS.length} 条 · 线性穿插 · 每题一次</p><span class="rec">短答案高频 · 可手动加频</span></span>
@@ -1593,12 +1810,13 @@ ${chatContext()}`;
   function render() {
     applyTheme();
     streakChip();
-    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === currentTab || (currentTab === 'defense' && b.dataset.tab === 'practice')));
+    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === currentTab || ((currentTab === 'defense' || currentTab === 'sprint') && b.dataset.tab === 'practice')));
     document.body.classList.toggle('chat-open', currentTab === 'chat');
     if (currentTab === 'home') view.innerHTML = homeHTML();
     else if (currentTab === 'practice') view.innerHTML = practiceHTML();
     else if (currentTab === 'chat') renderChatPage();
     else if (currentTab === 'defense') renderDefensePage();
+    else if (currentTab === 'sprint') renderSprintPage();
     else if (currentTab === 'library') {
       view.innerHTML = libraryHTML();
       refreshLibCount();
@@ -1747,13 +1965,14 @@ ${chatContext()}`;
     <div class="about">
       <p><b>这是什么</b><br>把两份最新版文档合并去重后的 ${TOTAL} 个问答做成默写卡：先凭记忆写，再自动对照原文，标出漏写和写错的地方，给出记忆建议，并按 FSRS 安排下次复习。</p>
       <p><b>批改方式</b><br>本地批改不联网：按“字符覆盖率 + 要点命中 + 数字检查”打分，红色标出与原文文字不一致的地方。红色不一定代表意思错，只代表和原文表述不同。</p>
+      <p><b>考前冲刺</b><br>上次述责答辩 16 道原题 + 44 道理论预测，10 分钟速览；不涉及个人经历。预测按上次“短定义 + 数字清单”的出题逻辑生成。</p>
       <p><b>答辩模式</b><br>从精简版答辩题池中按线性顺序穿插抽题，每题只出现一次；短答案排在前面，并可单独快刷。答错时先显示本地关联记忆点，配置 Key 后 AI 会逐条对比关联条目，并判断是否放入本轮结束后的回看队列。</p>
       <p><b>AI 教练</b><br>可选。问答页会把学习概览、最近默写、薄弱要点和题库索引发给已配置的模型；批改页的“AI 深度点评”共用同一接口。SiliconFlow 支持浏览器直连；OpenCode Go 的 dsv4.1-flash 需要服务端代理，浏览器直连会被 CORS 拦截。Key 只存本机。</p>
       <p><b>算法</b><br>FSRS 4.5（Free Spaced Repetition Scheduler），根据“忘记 / 模糊 / 记得 / 太简单”四级评级计算稳定度和难度；本地内置的是 <a href="https://github.com/open-spaced-repetition/ts-fsrs" target="_blank" rel="noopener">ts-fsrs</a> 4.7.1 的浏览器版本。</p>
       <p><b>交互参考</b><br><span class="tag">Anki</span><span class="tag">词光 Word Atlas</span><span class="tag">qwerty-learner</span> 的每日任务、间隔复习和移动端卡片思路。</p>
       <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 ${TOTAL} 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
       <p><b>隐私</b><br>学习记录和对话记录只存在本机 localStorage；没有账号、没有服务器。只有你点击发送时，当前题目/学习摘要和对话才会发给你配置的接口。换手机或清缓存前，请在“我的”里导出备份。</p>
-      <p style="font-size:11px">版本 2.3 · 2026-11-07</p>
+      <p style="font-size:11px">版本 2.4 · 2026-11-07</p>
     </div>`;
   }
 
@@ -2494,6 +2713,12 @@ ${peerText || '无'}
         review: { ...(base.defense.review || {}), ...((d.defense || {}).review || {}) },
         stats: { ...(base.defense.stats || {}), ...((d.defense || {}).stats || {}) }
       },
+      sprint: {
+        ...base.sprint,
+        ...(d.sprint || {}),
+        seen: { ...(base.sprint.seen || {}), ...((d.sprint || {}).seen || {}) },
+        weak: { ...(base.sprint.weak || {}), ...((d.sprint || {}).weak || {}) }
+      },
       settings: {
         ...base.settings,
         ...(d.settings || {}),
@@ -2571,6 +2796,41 @@ ${peerText || '无'}
         currentTab = 'defense';
         defenseFilter = 'all';
         render();
+        break;
+      case 'open-sprint':
+        closeSheet();
+        currentTab = 'sprint';
+        sprintFilter = 'all';
+        render();
+        break;
+      case 'sprint-start':
+        closeSheet();
+        sprintRunByMode(el.dataset.mode || 'all');
+        break;
+      case 'sprint-filter':
+        sprintFilter = el.dataset.filter || 'all';
+        renderSprintPage();
+        break;
+      case 'sprint-row':
+        openSprintDetail(el.dataset.id);
+        break;
+      case 'sprint-mark':
+        sprintMark(el.dataset.id, el.dataset.known === '1');
+        closeSheet();
+        if (currentTab === 'sprint') renderSprintPage();
+        toast(el.dataset.known === '1' ? '已标记会了' : '已标记还不会');
+        break;
+      case 'sprint-reveal':
+        sprintReveal();
+        break;
+      case 'sprint-answer':
+        sprintAnswer(el.dataset.known === '1');
+        break;
+      case 'sprint-close':
+        closeSprintRun();
+        break;
+      case 'sprint-restart':
+        if (sprintRun) startSprintRun(sprintRun.items.slice(), sprintRun.label);
         break;
       case 'defense-start':
         startDefense(null);
