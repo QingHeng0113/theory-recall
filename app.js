@@ -5,6 +5,8 @@
   const BY_ID = Object.fromEntries(ITEMS.map(x => [x.id, x]));
   const BY_N = Object.fromEntries(ITEMS.map(x => [x.n, x]));
   const TOTAL = ITEMS.length;
+  const DEF_ITEMS = ITEMS.filter(x => x.defense);
+  const DEF_GROUPS = (DECK.meta.defense && DECK.meta.defense.groups) || [];
   const LS_KEY = 'theory_recall_v1';
   const RING_C = 2 * Math.PI * 52;
   const NUM_RE = /(?:\d{1,4}|[〇一二三四五六七八九十百]{1,6})年|(?:[〇一二三四五六七八九十百]{1,3}|\d{1,2})个月|本世纪中叶/g;
@@ -50,6 +52,7 @@
   let session = null;
   let libQuery = '';
   let libFilter = 'all';
+  let defenseFilter = 'all';
   let deferredPrompt = null;
   let toastTimer = null;
   let aiSaveTimer = null;
@@ -130,6 +133,7 @@
       weak: {},
       wrong: {},
       chat: [],
+      defense: { boost: {}, aiMonitor: true, stats: { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 } },
       deckCount: TOTAL,
       settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
       created: Date.now()
@@ -191,6 +195,12 @@
         weak: d.weak || {},
         wrong: d.wrong || {},
         chat: Array.isArray(d.chat) ? d.chat.slice(-40) : [],
+        defense: {
+          ...base.defense,
+          ...(d.defense || {}),
+          boost: { ...(base.defense.boost || {}), ...((d.defense || {}).boost || {}) },
+          stats: { ...(base.defense.stats || {}), ...((d.defense || {}).stats || {}) }
+        },
         settings: {
           ...base.settings,
           ...(d.settings || {}),
@@ -1120,6 +1130,144 @@ ${chatContext()}`;
     navigator.clipboard?.writeText(msg.content).then(() => toast('已复制')).catch(() => toast('复制失败'));
   }
 
+  function defenseWeight(item) {
+    let w = item.defenseWeight || 1;
+    if (state.defense.boost[item.id]) w *= 2.5;
+    const wc = state.wrong[item.id]?.count || 0;
+    w *= 1 + Math.min(3, wc) * 0.25;
+    return w;
+  }
+  function pickDefenseWeighted(list, bonus = 1) {
+    const usable = list.filter(x => x);
+    if (!usable.length) return null;
+    const arr = usable.map(x => [x, defenseWeight(x) * bonus]);
+    const total = arr.reduce((s, x) => s + x[1], 0);
+    let r = Math.random() * total;
+    for (const [x, w] of arr) {
+      r -= w;
+      if (r <= 0) return x;
+    }
+    return usable[usable.length - 1];
+  }
+  function defensePickStart(pool) {
+    const list = (pool && pool.length ? pool : DEF_ITEMS);
+    return pickDefenseWeighted(list, 1).id;
+  }
+  function defensePickNext(currentId, recent) {
+    const cur = BY_ID[currentId];
+    if (!cur) return defensePickStart(DEF_ITEMS);
+    const recentSet = new Set((recent || []).slice(-5));
+    const peers = (cur.defensePeers || []).map(p => BY_ID[p.id]).filter(Boolean);
+    const groupPeers = DEF_ITEMS.filter(x => x.id !== currentId && x.defenseGroup === cur.defenseGroup);
+    const usable = list => {
+      const fresh = list.filter(x => !recentSet.has(x.id));
+      return fresh.length ? fresh : list;
+    };
+    if (peers.length) return pickDefenseWeighted(usable(peers), 2.2).id;
+    if (groupPeers.length) return pickDefenseWeighted(usable(groupPeers), 1.2).id;
+    return pickDefenseWeighted(usable(DEF_ITEMS.filter(x => x.id !== currentId)), 0.6).id;
+  }
+  function defenseFiltered() {
+    let pool = DEF_ITEMS.slice();
+    if (defenseFilter === 'short') pool = pool.filter(x => (x.defenseWeight || 1) >= 4);
+    else if (defenseFilter === 'boost') pool = pool.filter(x => state.defense.boost[x.id]);
+    else if (defenseFilter === 'wrong') pool = pool.filter(x => (state.wrong[x.id]?.count || 0) > 0 || (lastAttempt(x.id)?.score || 100) < 60);
+    return pool;
+  }
+  function defenseCardHTML(item) {
+    const boost = !!state.defense.boost[item.id];
+    const wrong = state.wrong[item.id]?.count || 0;
+    const last = lastAttempt(item.id);
+    const hot = (item.defenseWeight || 1) >= 4;
+    return `<button class="def-card ${boost ? 'boosted' : ''}" data-action="defense-card" data-id="${item.id}">
+      <span class="def-card-top">
+        <span class="def-num">${item.n}</span>
+        ${hot ? '<span class="def-badge hot">高频</span>' : ''}
+        ${boost ? '<span class="def-badge boost">★</span>' : ''}
+        ${wrong ? `<span class="def-badge wrong">错${wrong}</span>` : ''}
+      </span>
+      <span class="def-q">${esc(item.q)}</span>
+      <span class="def-meta">答案 ${item.a.length} 字${last ? ` · 上次 ${last.score} 分` : ''}</span>
+    </button>`;
+  }
+  function renderDefensePage() {
+    if (currentTab !== 'defense') return;
+    const st = state.defense.stats || { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 };
+    const avg = st.scoreCount ? Math.round(st.scoreSum / st.scoreCount) : '—';
+    const boostCount = Object.values(state.defense.boost || {}).filter(Boolean).length;
+    const pool = defenseFiltered();
+    const groups = DEF_GROUPS.map(g => ({
+      name: g.name,
+      items: pool.filter(x => x.defenseGroup === g.name)
+        .sort((a, b) => ((b.defenseWeight || 1) - (a.defenseWeight || 1)) || (a.n - b.n))
+    })).filter(g => g.items.length);
+    const filterDefs = [['all', '全部'], ['short', '高频短答'], ['boost', '加频'], ['wrong', '错题']];
+    view.innerHTML = `<div class="def-head">
+      <button class="back-link" data-action="tab" data-tab="practice">← 返回训练</button>
+      <h1>答辩模式</h1>
+      <p>答辩题池 ${DEF_ITEMS.length} 条 · 短答案高频 · 关联链连续默写</p>
+    </div>
+    <div class="def-summary">
+      <div><b>${DEF_ITEMS.length}</b><span>题池</span></div>
+      <div><b>${st.total || 0}</b><span>累计答辩</span></div>
+      <div class="gold"><b>${avg}</b><span>平均分</span></div>
+      <div class="red"><b>${boostCount}</b><span>加频题</span></div>
+    </div>
+    <button class="btn btn-primary btn-block def-start" data-action="defense-start">按关联链开始 · 不限题数</button>
+    <div class="def-tools">
+      <button class="btn btn-sm" data-action="defense-random">随机一条</button>
+      <label class="def-ai-toggle"><span>AI 监测${state.settings.ai.key ? '' : '（本地）'}</span><input type="checkbox" id="defenseAI" ${state.defense.aiMonitor ? 'checked' : ''}></label>
+    </div>
+    <div class="filters">${filterDefs.map(([k, n]) => `<button class="filter ${defenseFilter === k ? 'active' : ''}" data-action="defense-filter" data-filter="${k}">${n}</button>`).join('')}</div>
+    <div class="def-note">点任意题目开始；答完自动进入下一道关联题。答案短的题权重更高，标★的题会额外加频。</div>
+    ${groups.length ? groups.map(g => `<div class="def-group">
+      <div class="def-group-head"><h3>${esc(g.name)}</h3><span>${g.items.length} 条</span></div>
+      <div class="def-grid">${g.items.map(defenseCardHTML).join('')}</div>
+    </div>`).join('') : `<div class="empty">${ico('search')}<div>这个筛选下没有题目</div></div>`}
+    <div class="foot-note">答辩题池来自你提供的《精简版答辩背诵》；默写记录与主题库共用。</div>`;
+  }
+  function startDefense(id) {
+    const item = BY_ID[id];
+    if (!item) return;
+    if (session) { sessionEl.classList.remove('open'); session = null; }
+    session = {
+      mode: 'defense',
+      queue: [],
+      total: 0,
+      done: 0,
+      replay: [],
+      current: { id, isNew: isNew(id) },
+      lastId: id,
+      recent: [id],
+      start: Date.now(),
+      cardStart: Date.now(),
+      userAnswer: state.drafts[id] || '',
+      submitted: false,
+      result: null,
+      suggested: null,
+      ai: '',
+      aiError: '',
+      aiLoading: false,
+      defenseAI: '',
+      defenseAIError: '',
+      defenseAILoading: false,
+      defenseAIAbort: null,
+      stats: { new: 0, rev: 0, again: 0, ok: 0, scoreSum: 0, scoreCount: 0 },
+      defense: { total: 0, scoreSum: 0, scoreCount: 0, wrong: 0 }
+    };
+    sessionEl.classList.add('open');
+    renderStudy();
+    sessionEl.scrollTop = 0;
+  }
+  function toggleBoost(id) {
+    if (!BY_ID[id]) return;
+    state.defense.boost[id] = !state.defense.boost[id];
+    save();
+    if (session && session.current?.id === id) renderStudy();
+    else if (currentTab === 'defense') renderDefensePage();
+    toast(state.defense.boost[id] ? '已加高这道题的频率' : '已取消加频');
+  }
+
   function homeHTML() {
     const day = getDay();
     const p = plan();
@@ -1166,6 +1314,11 @@ ${chatContext()}`;
       <div class="stat-mini gold"><b>${avg || '—'}</b><span>平均得分</span></div>
       <div class="stat-mini red"><b>${st}</b><span>连续天数</span></div>
     </div>
+    <button class="defense-banner" data-action="open-defense">
+      <span class="defense-banner-icon">${ico('trophy')}</span>
+      <span class="defense-banner-main"><b>答辩模式</b><span>关联链反复默写 · 短答案高频 · AI 监测</span></span>
+      <span class="defense-banner-cta">进入</span>
+    </button>
     <div class="section-title"><h2>今日安排</h2><span>${remain ? '按计划来' : '已完成'}</span></div>
     <div class="card plan-card">
       <div class="plan-row">
@@ -1217,6 +1370,11 @@ ${chatContext()}`;
     return `
     <div class="page-head"><h1>默写训练</h1><p>每次默写都会批改、给建议，并更新复习计划。</p></div>
     <div class="mode-grid">
+      <button class="mode-card defense-entry" data-action="open-defense">
+        <span class="mode-ico gold">${ico('trophy')}</span>
+        <span class="mode-main"><h3>答辩模式</h3><p>答辩题池 ${DEF_ITEMS.length} 条 · 按关联链反复默写</p><span class="rec">短答案高频 · 可手动加频</span></span>
+        <span class="chev">${ico('chevron')}</span>
+      </button>
       <button class="mode-card" data-action="start-session">
         <span class="mode-ico red">${ico('pen')}</span>
         <span class="mode-main"><h3>今日默写</h3><p>到期复习 + 今日新学，按 FSRS 安排</p><span class="rec">${remain ? `还剩 ${remain} 条` : '今天已完成'}</span></span>
@@ -1401,11 +1559,12 @@ ${chatContext()}`;
   function render() {
     applyTheme();
     streakChip();
-    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === currentTab));
+    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === currentTab || (currentTab === 'defense' && b.dataset.tab === 'practice')));
     document.body.classList.toggle('chat-open', currentTab === 'chat');
     if (currentTab === 'home') view.innerHTML = homeHTML();
     else if (currentTab === 'practice') view.innerHTML = practiceHTML();
     else if (currentTab === 'chat') renderChatPage();
+    else if (currentTab === 'defense') renderDefensePage();
     else if (currentTab === 'library') {
       view.innerHTML = libraryHTML();
       refreshLibCount();
@@ -1554,12 +1713,13 @@ ${chatContext()}`;
     <div class="about">
       <p><b>这是什么</b><br>把两份最新版文档合并去重后的 ${TOTAL} 个问答做成默写卡：先凭记忆写，再自动对照原文，标出漏写和写错的地方，给出记忆建议，并按 FSRS 安排下次复习。</p>
       <p><b>批改方式</b><br>本地批改不联网：按“字符覆盖率 + 要点命中 + 数字检查”打分，红色标出与原文文字不一致的地方。红色不一定代表意思错，只代表和原文表述不同。</p>
+      <p><b>答辩模式</b><br>从精简版答辩题池中按关联链连续抽题，短答案权重更高；可手动加频。答错时先显示本地关联记忆点，配置 Key 后 AI 会逐条对比关联条目并给记忆锚点。</p>
       <p><b>AI 教练</b><br>可选。问答页会把学习概览、最近默写、薄弱要点和题库索引发给已配置的模型；批改页的“AI 深度点评”共用同一接口。SiliconFlow 支持浏览器直连；OpenCode Go 的 dsv4.1-flash 需要服务端代理，浏览器直连会被 CORS 拦截。Key 只存本机。</p>
       <p><b>算法</b><br>FSRS 4.5（Free Spaced Repetition Scheduler），根据“忘记 / 模糊 / 记得 / 太简单”四级评级计算稳定度和难度；本地内置的是 <a href="https://github.com/open-spaced-repetition/ts-fsrs" target="_blank" rel="noopener">ts-fsrs</a> 4.7.1 的浏览器版本。</p>
       <p><b>交互参考</b><br><span class="tag">Anki</span><span class="tag">词光 Word Atlas</span><span class="tag">qwerty-learner</span> 的每日任务、间隔复习和移动端卡片思路。</p>
       <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 ${TOTAL} 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
       <p><b>隐私</b><br>学习记录和对话记录只存在本机 localStorage；没有账号、没有服务器。只有你点击发送时，当前题目/学习摘要和对话才会发给你配置的接口。换手机或清缓存前，请在“我的”里导出备份。</p>
-      <p style="font-size:11px">版本 2.0 · 2026-11-06</p>
+      <p style="font-size:11px">版本 2.1 · 2026-11-07</p>
     </div>`;
   }
 
@@ -1632,18 +1792,41 @@ ${chatContext()}`;
     startQueue([{ id, isNew: isNew(id) }], 'one');
   }
 
+  function resetCardFields(id, replay = false) {
+    if (session.defenseAIAbort) {
+      try { session.defenseAIAbort.abort(); } catch (e) { /* ignore */ }
+      session.defenseAIAbort = null;
+    }
+    session.current = replay ? { id, replay: true } : { id, isNew: isNew(id) };
+    session.userAnswer = replay ? '' : (state.drafts[id] || '');
+    session.submitted = false;
+    session.result = null;
+    session.suggested = null;
+    session.ai = '';
+    session.aiError = '';
+    session.aiLoading = false;
+    session.defenseAI = '';
+    session.defenseAIError = '';
+    session.defenseAILoading = false;
+    session.cardStart = Date.now();
+  }
   function nextCard() {
     if (!session) return;
+    if (session.mode === 'defense') {
+      const nextId = defensePickNext(session.lastId, session.recent);
+      if (!nextId) return;
+      session.lastId = nextId;
+      session.recent.push(nextId);
+      if (session.recent.length > 6) session.recent.shift();
+      resetCardFields(nextId);
+      renderStudy();
+      sessionEl.scrollTop = 0;
+      return;
+    }
     if (!session.queue.length) {
       if (session.replay.length) {
         const r = session.replay.shift();
-        session.current = { id: r.id, replay: true };
-        session.submitted = false;
-        session.result = null;
-        session.ai = '';
-        session.aiError = '';
-        session.userAnswer = '';
-        session.cardStart = Date.now();
+        resetCardFields(r.id, true);
         renderStudy();
         sessionEl.scrollTop = 0;
         return;
@@ -1652,23 +1835,17 @@ ${chatContext()}`;
       return;
     }
     const c = session.queue.shift();
-    session.current = c;
-    session.userAnswer = state.drafts[c.id] || '';
-    session.submitted = false;
-    session.result = null;
-    session.suggested = null;
-    session.ai = '';
-    session.aiError = '';
-    session.aiLoading = false;
-    session.cardStart = Date.now();
+    resetCardFields(c.id);
     renderStudy();
     sessionEl.scrollTop = 0;
   }
 
   function closeSession(goHome = false) {
     if (!session) return;
+    const wasDefense = session.mode === 'defense';
     const dirty = session.done > 0 || (session.userAnswer || '').trim() || session.submitted;
     if (!session.finished && dirty && !confirm('退出本次默写？已完成的进度会保存。')) return;
+    if (session.defenseAIAbort) { try { session.defenseAIAbort.abort(); } catch (e) { /* ignore */ } }
     window.speechSynthesis?.cancel();
     speechToken++;
     confettiEl.innerHTML = '';
@@ -1677,6 +1854,7 @@ ${chatContext()}`;
     sessionEl.innerHTML = '';
     session = null;
     if (goHome) currentTab = 'home';
+    else if (wasDefense) currentTab = 'defense';
     render();
   }
 
@@ -1693,7 +1871,11 @@ ${chatContext()}`;
     session.suggested = skipped ? 1 : scoreToRating(result.score);
     delete state.drafts[item.id];
     recordAttempt(item, result, skipped);
-    if (state.settings.ai.key && state.settings.ai.auto) {
+    if (session.mode === 'defense') {
+      if (state.defense.aiMonitor && state.settings.ai.key.trim() && result.score < 75) {
+        setTimeout(runDefenseAI, 50);
+      }
+    } else if (state.settings.ai.key && state.settings.ai.auto) {
       setTimeout(runAI, 50);
     }
     save();
@@ -1720,6 +1902,7 @@ ${chatContext()}`;
 
   function finishCard(rating) {
     if (!session || !session.current || !session.submitted) return;
+    const wasDefense = session.mode === 'defense';
     const id = session.current.id;
     const item = BY_ID[id];
     const res = session.result;
@@ -1760,7 +1943,20 @@ ${chatContext()}`;
     session.stats.scoreSum += res.score;
     session.stats.scoreCount++;
     session.done++;
-    if (rating === 1) session.replay.push({ id });
+    if (wasDefense) {
+      session.defense.total++;
+      session.defense.scoreSum += res.score;
+      session.defense.scoreCount++;
+      if (rating === 1 || res.score < 60) session.defense.wrong++;
+      const ds = state.defense.stats;
+      ds.total = (ds.total || 0) + 1;
+      ds.scoreSum = (ds.scoreSum || 0) + res.score;
+      ds.scoreCount = (ds.scoreCount || 0) + 1;
+      if (rating === 1 || res.score < 60) ds.wrong = (ds.wrong || 0) + 1;
+      session.lastId = id;
+    } else if (rating === 1) {
+      session.replay.push({ id });
+    }
     session.current = null;
     save();
     nextCard();
@@ -1783,18 +1979,21 @@ ${chatContext()}`;
     const total = Math.max(session.total, done + session.queue.length + session.replay.length);
     const pct = total ? (done / total) * 100 : 0;
     const isReplay = !!session.current.replay;
-    const title = session.mode === 'srs' ? '今日默写' : session.mode === 'learned' ? '已学抽背' : session.mode === 'random' ? '随机抽背' : session.mode === 'wrong' ? '错题重默' : session.mode === 'weak' ? '薄弱专项' : '单条默写';
+    const isDefense = session.mode === 'defense';
+    const defAvg = session.defense && session.defense.scoreCount ? Math.round(session.defense.scoreSum / session.defense.scoreCount) : null;
+    const title = isDefense ? '答辩模式' : session.mode === 'srs' ? '今日默写' : session.mode === 'learned' ? '已学抽背' : session.mode === 'random' ? '随机抽背' : session.mode === 'wrong' ? '错题重默' : session.mode === 'weak' ? '薄弱专项' : '单条默写';
     sessionEl.innerHTML = `<div class="session-shell">
       <div class="session-top">
         <button class="session-close" data-action="close-session" aria-label="退出">${ico('x')}</button>
-        <div class="progress-track"><i style="width:${clamp(pct, 0, 100)}%"></i></div>
-        <span class="session-counter">${isReplay ? '巩固' : `${Math.min(done + 1, total)}/${total}`}</span>
+        ${isDefense ? `<div class="defense-chain-label">关联链 · 已默写 ${done} 题${defAvg != null ? ` · 平均 ${defAvg}` : ''}</div>` : `<div class="progress-track"><i style="width:${clamp(pct, 0, 100)}%"></i></div>`}
+        <span class="session-counter">${isDefense ? `第 ${done + 1} 题` : (isReplay ? '巩固' : `${Math.min(done + 1, total)}/${total}`)}</span>
       </div>
       <div class="session-body ${session.submitted && !isReplay ? 'with-dock' : ''}">
         <div class="session-inner">
           <div class="study-eyebrow">
             <span class="pill">${esc(title)}</span>
             <span>第 ${item.n} 条 · ${esc(item.sec)}</span>
+            ${isDefense ? '<span class="pill gold">关联链</span>' : ''}
             ${isReplay ? '<span class="pill gold">再巩固</span>' : (session.current.isNew ? '<span class="pill gold">新学</span>' : '<span class="pill red">复习</span>')}
           </div>
           <div class="study-q">${esc(item.q)}</div>
@@ -1830,6 +2029,7 @@ ${chatContext()}`;
       <div class="study-meta">
         <span>${item.a.length} 字</span><span class="dot"></span><span>${kp} 个关键点</span>
         ${session.current.isNew ? '<span class="dot"></span><span>先按自己的理解写</span>' : ''}
+        ${session.mode === 'defense' ? `<button class="boost-btn ${state.defense.boost[item.id] ? 'on' : ''}" data-action="toggle-boost" data-id="${item.id}">${state.defense.boost[item.id] ? '★ 已加频' : '☆ 加高频'}</button>` : ''}
       </div>
       ${relatedRowHTML(item)}
       <textarea id="answerInput" class="answer-input" placeholder="凭记忆写下答案。不必逐字一致，关键点要对。">${esc(session.userAnswer)}</textarea>
@@ -1879,6 +2079,7 @@ ${chatContext()}`;
         </div>
       </div>
       <div class="key-hits">${keyChips}</div>
+      ${session.mode === 'defense' ? `<div class="def-monitor-line">AI 监测 · 本轮 ${session.done + 1} 题 · 平均 ${Math.round(((session.defense.scoreSum || 0) + res.score) / ((session.defense.total || 0) + 1))} · 错 ${(session.defense.wrong || 0) + (res.score < 60 ? 1 : 0)} <button class="boost-btn ${state.defense.boost[item.id] ? 'on' : ''}" data-action="toggle-boost" data-id="${item.id}">${state.defense.boost[item.id] ? '★ 已加频' : '☆ 加高频'}</button></div>` : ''}
       ${relatedRowHTML(item)}
       <div class="compare-card">
         <div class="compare-label">参考答案 <span>红色 = 与原文不一致</span></div>
@@ -1917,6 +2118,7 @@ ${chatContext()}`;
     </div>`;
   }
   function aiBoxHTML() {
+    if (session.mode === 'defense') return defenseAIBoxHTML(BY_ID[session.current.id]);
     if (session.aiLoading) {
       return `<div class="ai-head"><span>AI 深度点评</span><span class="ai-status">分析中…</span></div><div class="ai-loading"><i></i><i></i><i></i></div>`;
     }
@@ -1931,6 +2133,98 @@ ${chatContext()}`;
     }
     return `<div class="ai-row"><div><b>AI 深度点评</b><span>把这道题发给已配置的模型，做更细的批改。</span></div><button class="btn btn-sm" data-action="ai-run">开始点评</button></div>`;
   }
+  function defenseRelatedMemoryHTML(item) {
+    const res = session.result || { score: 0 };
+    const wrong = res.score < 75;
+    const peers = (item.defensePeers || []).map(p => ({ ...p, item: BY_ID[p.id] })).filter(x => x.item).slice(0, wrong ? 3 : 2);
+    if (!peers.length) return '';
+    return `<div class="related-memory">
+      <div class="rel-mem-head">${wrong ? '这次和这些条目对比记' : '顺手复习相关条目'}</div>
+      ${peers.map(p => `<div class="rel-mem-item">
+        <div class="rel-mem-top"><b>第 ${p.item.n} 条 · ${esc(p.item.topic)}</b><span>${esc(p.note || '同组关联，注意对比')}</span></div>
+        <div class="rel-mem-a">${esc(p.item.a.slice(0, 120))}${p.item.a.length > 120 ? '…' : ''}</div>
+        <button class="mini-link" data-action="open-detail" data-id="${p.item.id}">看原文</button>
+      </div>`).join('')}
+      <div class="rel-mem-anchor">记忆锚点：把「${esc(item.topic)}」和「${esc(peers[0].item.topic)}」放在一起，先记区别：${esc(peers[0].note || '同组关联')}</div>
+    </div>`;
+  }
+  function defenseAIBoxHTML(item) {
+    const hasKey = !!state.settings.ai.key.trim();
+    const monitor = state.defense.aiMonitor;
+    const wrong = (session.result?.score || 0) < 75;
+    let body = '';
+    if (session.defenseAILoading) {
+      body = `<div class="ai-loading"><i></i><i></i><i></i></div><div class="def-ai-hint">AI 正在逐条对比关联条目…</div>`;
+    } else if (session.defenseAI) {
+      body = `<div class="ai-text">${mdLite(session.defenseAI)}</div>`;
+    } else if (session.defenseAIError) {
+      body = `<div class="ai-error">${esc(session.defenseAIError)} <button class="mini-link" data-action="defense-ai-run">重试</button></div>`;
+    } else if (!hasKey) {
+      body = `<div class="def-ai-hint">配置 API Key 后，AI 会逐条分析关联关系；现在先用上面的本地关联记忆点。</div><button class="btn btn-sm" data-action="ai-settings">去配置</button>`;
+    } else if (!monitor) {
+      body = `<div class="def-ai-hint">AI 监测已关闭；需要时可手动分析。</div><button class="btn btn-sm" data-action="defense-ai-run">AI 对照分析</button>`;
+    } else if (!wrong) {
+      body = `<button class="btn btn-sm" data-action="defense-ai-run">AI 对照分析</button>`;
+    } else {
+      body = `<div class="def-ai-hint">这道题低于 75 分，AI 会自动分析；如果没开始可手动触发。</div><button class="btn btn-sm" data-action="defense-ai-run">AI 对照分析</button>`;
+    }
+    return `<div class="def-ai-box" id="defenseAIBox">
+      <div class="def-ai-head"><span>${hasKey && monitor ? 'AI 监测' : '关联记忆点'}</span><span>${session.defenseAILoading ? '分析中…' : (hasKey && monitor ? '实时' : '')}</span></div>
+      ${defenseRelatedMemoryHTML(item)}
+      <div id="defenseAIText">${body}</div>
+    </div>`;
+  }
+  async function runDefenseAI() {
+    if (!session || session.mode !== 'defense' || !session.submitted || session.current?.replay) return;
+    if (!state.settings.ai.key.trim()) { toast('先配置 API Key'); openAiSettings(); return; }
+    if (session.defenseAILoading) return;
+    const id = session.current.id;
+    const item = BY_ID[id];
+    const res = session.result;
+    const peers = (item.defensePeers || []).map(p => ({ ...p, item: BY_ID[p.id] })).filter(x => x.item).slice(0, 3);
+    const peerText = peers.map(p => `第${p.item.n}条《${p.item.topic}》：${p.item.q} 标准答案：${p.item.a.slice(0, 180)}；关联提示：${p.note || ''}`).join('\n');
+    const prompt = `我在准备党的理论知识答辩，请结合我的默写和关联条目做“关联记忆点”分析。
+当前题目：第${item.n}条《${item.topic}》${item.q}
+标准答案：${item.a}
+我的默写：${(session.userAnswer || '').trim() || '（未作答）'}
+本地批改：得分 ${res.score}；漏写/未命中：${res.missing.map(k => k.t).join('、') || '无'}。
+关联条目：
+${peerText || '无'}
+请输出四段：
+1. 我错在哪（具体到漏写的词，引用我的原话）；
+2. 和每个关联条目的区别（逐条一句话）；
+3. 3 个记忆锚点或口诀；
+4. 下一题建议。总字数不超过 350 字。`;
+    const ctrl = new AbortController();
+    session.defenseAIAbort = ctrl;
+    session.defenseAILoading = true;
+    session.defenseAI = '';
+    session.defenseAIError = '';
+    renderStudy();
+    try {
+      await streamChat([
+        { role: 'system', content: '你是严谨、简洁的答辩背诵教练。只依据给出的题库答案和关联条目分析，不要编造原文。' },
+        { role: 'user', content: prompt }
+      ], delta => {
+        if (session.current?.id !== id) return;
+        session.defenseAI += delta;
+        const el = document.getElementById('defenseAIText');
+        if (el) el.innerHTML = mdLite(session.defenseAI);
+      }, ctrl.signal);
+      if (!session.defenseAI) throw new Error('接口没有返回文本内容');
+    } catch (e) {
+      if (e.name !== 'AbortError' && session.current?.id === id) {
+        session.defenseAIError = e.message || String(e);
+      }
+    } finally {
+      if (session.current?.id === id) {
+        session.defenseAILoading = false;
+        session.defenseAIAbort = null;
+        renderStudy();
+      }
+    }
+  }
+
   function renderSummary() {
     const s = session;
     const total = s.stats.scoreCount;
@@ -2124,6 +2418,12 @@ ${chatContext()}`;
       weak: d.weak || {},
       wrong: d.wrong || {},
       chat: Array.isArray(d.chat) ? d.chat.slice(-40) : [],
+      defense: {
+        ...base.defense,
+        ...(d.defense || {}),
+        boost: { ...(base.defense.boost || {}), ...((d.defense || {}).boost || {}) },
+        stats: { ...(base.defense.stats || {}), ...((d.defense || {}).stats || {}) }
+      },
       settings: {
         ...base.settings,
         ...(d.settings || {}),
@@ -2195,6 +2495,34 @@ ${chatContext()}`;
       case 'practice-learned':
         closeSheet();
         startLearned();
+        break;
+      case 'open-defense':
+        closeSheet();
+        currentTab = 'defense';
+        defenseFilter = 'all';
+        render();
+        break;
+      case 'defense-start':
+        startDefense(defensePickStart(defenseFiltered()));
+        break;
+      case 'defense-random': {
+        const pool = defenseFiltered();
+        const arr = pool.length ? pool : DEF_ITEMS;
+        startDefense(arr[Math.floor(Math.random() * arr.length)].id);
+        break;
+      }
+      case 'defense-card':
+        startDefense(el.dataset.id);
+        break;
+      case 'defense-filter':
+        defenseFilter = el.dataset.filter || 'all';
+        renderDefensePage();
+        break;
+      case 'toggle-boost':
+        toggleBoost(el.dataset.id);
+        break;
+      case 'defense-ai-run':
+        runDefenseAI();
         break;
       case 'practice-wrong':
         closeSheet();
@@ -2389,6 +2717,11 @@ ${chatContext()}`;
     }
   });
   document.addEventListener('change', e => {
+    if (e.target.id === 'defenseAI') {
+      state.defense.aiMonitor = e.target.checked;
+      save();
+      toast(e.target.checked ? 'AI 监测已开启' : 'AI 监测已关闭，本地关联分析仍可用');
+    }
     if (e.target.id === 'aiAuto') {
       state.settings.ai.auto = e.target.checked;
       save();
