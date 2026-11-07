@@ -1236,7 +1236,7 @@ ${chatContext()}`;
     </div>
     ${reviewCount ? `<button class="def-review-banner" data-action="defense-review">待回看 ${reviewCount} 条 · 跑完新题后再回看 →</button>` : ''}
     <div class="filters">${filterDefs.map(([k, n]) => `<button class="filter ${defenseFilter === k ? 'active' : ''}" data-action="defense-filter" data-filter="${k}">${n}</button>`).join('')}</div>
-    <div class="def-note">线性过一遍：每题只出现一次，按关联组轮转穿插；错题不打断，进入本轮结束后的回看队列。数字分类建议先点上面的“数字分类速过”。</div>
+    <div class="def-note">线性过一遍：每题只出现一次，按关联组轮转穿插；错题不打断，进入本轮结束后的回看队列。★ 加频的题会在本轮结束后额外回看一次。数字分类建议先点上面的“数字分类速过”。</div>
     ${groups.length ? groups.map(g => `<div class="def-group">
       <div class="def-group-head"><h3>${esc(g.name)}</h3><span>${g.items.length} 条</span></div>
       <div class="def-grid">${g.items.map(defenseCardHTML).join('')}</div>
@@ -1753,7 +1753,7 @@ ${chatContext()}`;
       <p><b>交互参考</b><br><span class="tag">Anki</span><span class="tag">词光 Word Atlas</span><span class="tag">qwerty-learner</span> 的每日任务、间隔复习和移动端卡片思路。</p>
       <p><b>内容来源</b><br>你提供的《党的基本理论知识篇》docx，共 ${TOTAL} 条。只修正了明显笔误：“红红脸、出汗汗”改为“红红脸、出出汗”。其余按原文保留。</p>
       <p><b>隐私</b><br>学习记录和对话记录只存在本机 localStorage；没有账号、没有服务器。只有你点击发送时，当前题目/学习摘要和对话才会发给你配置的接口。换手机或清缓存前，请在“我的”里导出备份。</p>
-      <p style="font-size:11px">版本 2.2 · 2026-11-07</p>
+      <p style="font-size:11px">版本 2.3 · 2026-11-07</p>
     </div>`;
   }
 
@@ -1898,6 +1898,9 @@ ${chatContext()}`;
     if (defMode && result.score < 75) {
       addDefenseReview(item.id, result.score < 40 ? 3 : result.score < 60 ? 2 : 1, result.score);
     }
+    if (defMode && state.defense.boost[item.id]) {
+      addDefenseReview(item.id, 3, result.score);
+    }
     if (defMode) {
       if (state.defense.aiMonitor && state.settings.ai.key.trim() && result.score < 75) {
         setTimeout(runDefenseAI, 50);
@@ -1988,6 +1991,9 @@ ${chatContext()}`;
         if (rating >= 3 && res.score >= 70) delete state.defense.review[id];
         else addDefenseReview(id, 3, res.score);
       } else if (rating === 1) {
+        addDefenseReview(id, 3, res.score);
+      }
+      if (state.defense.boost[id] && session.mode !== 'defense-review') {
         addDefenseReview(id, 3, res.score);
       }
     } else if (rating === 1) {
@@ -2205,7 +2211,7 @@ ${chatContext()}`;
       body = `<div class="def-ai-hint">这道题低于 75 分，AI 会自动分析；如果没开始可手动触发。</div><button class="btn btn-sm" data-action="defense-ai-run">AI 对照分析</button>`;
     }
     const rv = state.defense.review[item.id];
-    const reviewLine = `<div class="def-review-state">${rv ? `已排入本轮后的回看（优先级 ${rv.priority}）` : '本轮不安排回看，继续新知识'}</div>`;
+    const reviewLine = `<div class="def-review-state">${rv ? `已排入本轮后的回看（优先级 ${rv.priority}）` : (state.defense.boost[item.id] ? '★ 已加频：本轮结束后额外回看一次' : '本轮不安排回看，继续新知识')}</div>`;
     return `<div class="def-ai-box" id="defenseAIBox">
       <div class="def-ai-head"><span>${hasKey && monitor ? 'AI 监测' : '关联记忆点'}</span><span>${session.defenseAILoading ? '分析中…' : (hasKey && monitor ? '实时' : '')}</span></div>
       ${defenseRelatedMemoryHTML(item)}
@@ -2255,8 +2261,10 @@ ${peerText || '无'}
       const m = session.defenseAI.match(/(?:REVIEW|回看)\s*[:：]\s*(high|medium|low|none|高|中|低|不需要|不需要回看)/i);
       if (m) {
         const v = m[1].toLowerCase();
-        if (v === 'none' || v === '不需要' || v === '不需要回看') delete state.defense.review[id];
-        else addDefenseReview(id, (v === 'high' || v === '高') ? 3 : (v === 'medium' || v === '中') ? 2 : 1, res.score);
+        if (v === 'none' || v === '不需要' || v === '不需要回看') {
+          if (state.defense.boost[id]) addDefenseReview(id, 3, res.score);
+          else delete state.defense.review[id];
+        } else addDefenseReview(id, (v === 'high' || v === '高') ? 3 : (v === 'medium' || v === '中') ? 2 : 1, res.score);
         session.defenseAI = session.defenseAI.replace(/(?:REVIEW|回看)\s*[:：].*$/mi, '').trim();
         save();
       }
