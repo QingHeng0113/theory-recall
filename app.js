@@ -1158,14 +1158,18 @@ ${chatContext()}`;
     if (!cur) return defensePickStart(DEF_ITEMS);
     const recentSet = new Set((recent || []).slice(-5));
     const peers = (cur.defensePeers || []).map(p => BY_ID[p.id]).filter(Boolean);
+    const relIds = new Set((cur.related || []).map(r => r.id));
+    const related = peers.filter(p => relIds.has(p.id));
+    const same = peers.filter(p => !relIds.has(p.id));
     const groupPeers = DEF_ITEMS.filter(x => x.id !== currentId && x.defenseGroup === cur.defenseGroup);
     const usable = list => {
       const fresh = list.filter(x => !recentSet.has(x.id));
       return fresh.length ? fresh : list;
     };
-    if (peers.length) return pickDefenseWeighted(usable(peers), 2.2).id;
-    if (groupPeers.length) return pickDefenseWeighted(usable(groupPeers), 1.2).id;
-    return pickDefenseWeighted(usable(DEF_ITEMS.filter(x => x.id !== currentId)), 0.6).id;
+    if (related.length) return pickDefenseWeighted(usable(related), 3.0).id;
+    if (same.length) return pickDefenseWeighted(usable(same), 1.2).id;
+    if (groupPeers.length) return pickDefenseWeighted(usable(groupPeers), 0.9).id;
+    return pickDefenseWeighted(usable(DEF_ITEMS.filter(x => x.id !== currentId)), 0.5).id;
   }
   function defenseFiltered() {
     let pool = DEF_ITEMS.slice();

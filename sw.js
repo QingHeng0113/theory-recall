@@ -1,4 +1,4 @@
-const CACHE = 'theory-recall-v9';
+const CACHE = 'theory-recall-v10';
 const ASSETS = [
   './',
   './index.html',
